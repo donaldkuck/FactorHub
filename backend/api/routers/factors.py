@@ -11,6 +11,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from backend.services.factor_service import factor_service
 from backend.services.factor_generator_service import factor_generator_service
+from backend.core.factor_targets import DEFAULT_FACTOR_TARGET, DEFAULT_FREQUENCY
+from backend.core.database import get_db_session
+from backend.repositories.factor_repository import FactorRepository, FactorValueCacheRepository
+from backend.services.factor_dataset_service import factor_dataset_service, hash_factor_code
 
 router = APIRouter()
 
@@ -24,6 +28,8 @@ class FactorCreate(BaseModel):
     category: str
     description: str = ""
     formula_type: str = "expression"  # expression 或 function
+    target: str = DEFAULT_FACTOR_TARGET
+    frequency: str = DEFAULT_FREQUENCY
 
 
 class FactorUpdate(BaseModel):
@@ -32,6 +38,17 @@ class FactorUpdate(BaseModel):
     code: Optional[str] = None
     category: Optional[str] = None
     description: Optional[str] = None
+    target: Optional[str] = None
+    frequency: Optional[str] = None
+
+
+class FactorValueBackfillRequest(BaseModel):
+    """回填因子值缓存请求"""
+    stock_codes: List[str]
+    start_date: str
+    end_date: str
+    frequency: str = DEFAULT_FREQUENCY
+    force: bool = False
 
 
 class BatchGenerateRequest(BaseModel):
@@ -56,7 +73,9 @@ class PreselectRequest(BaseModel):
 @router.get("/")
 async def get_factors(
     category: Optional[str] = None,
-    source: Optional[str] = None
+    source: Optional[str] = None,
+    target: Optional[str] = None,
+    frequency: Optional[str] = None,
 ):
     """
     获取因子列表
@@ -64,9 +83,11 @@ async def get_factors(
     参数:
     - category: 分类筛选（可选）
     - source: 来源筛选 preset/user（可选）
+    - target: 预测目标筛选（可选）
+    - frequency: 数据频率筛选（可选）
     """
     try:
-        factors = factor_service.get_all_factors()
+        factors = factor_service.get_all_factors(target=target, frequency=frequency)
 
         # 筛选
         if category:
@@ -79,6 +100,8 @@ async def get_factors(
             "data": factors,
             "total": len(factors)
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -94,6 +117,54 @@ async def get_factor_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{factor_id}/backfill-values")
+async def backfill_factor_values(factor_id: int, request: FactorValueBackfillRequest):
+    """回填某个因子的历史因子值缓存"""
+    db = get_db_session()
+    try:
+        result = factor_dataset_service.backfill_factor_values(
+            db=db,
+            factor_id=factor_id,
+            stock_codes=request.stock_codes,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            frequency=request.frequency,
+            force=request.force,
+        )
+        return {"success": True, "data": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@router.get("/{factor_id}/values")
+async def get_factor_values(
+    factor_id: int,
+    stock_code: str,
+    start_date: str,
+    end_date: str,
+    frequency: str = DEFAULT_FREQUENCY,
+):
+    """读取某个因子的历史因子值缓存"""
+    db = get_db_session()
+    try:
+        factor = FactorRepository(db).get_by_id(factor_id)
+        if not factor:
+            raise HTTPException(status_code=404, detail="因子不存在")
+        rows = FactorValueCacheRepository(db).get_values(
+            factor_id,
+            hash_factor_code(factor.code),
+            stock_code,
+            start_date,
+            end_date,
+            frequency,
+        )
+        return {"success": True, "data": rows}
+    finally:
+        db.close()
 
 
 @router.get("/{factor_id}")
@@ -127,7 +198,9 @@ async def create_factor(request: FactorCreate):
             code=request.code,
             category=request.category,
             description=request.description,
-            formula_type=request.formula_type
+            formula_type=request.formula_type,
+            target=request.target,
+            frequency=request.frequency,
         )
 
         return {
@@ -135,6 +208,8 @@ async def create_factor(request: FactorCreate):
             "data": factor,
             "message": "因子创建成功"
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -149,13 +224,17 @@ async def update_factor(factor_id: int, request: FactorUpdate):
             name=request.name,
             code=request.code,
             category=request.category,
-            description=request.description
+            description=request.description,
+            target=request.target,
+            frequency=request.frequency,
         )
 
         return {
             "success": True,
             "message": "因子更新成功"
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -355,7 +434,9 @@ async def copy_factor(factor_id: int):
             code=original_factor.get("code", ""),
             category=original_factor.get("category", ""),
             description=original_factor.get("description", ""),
-            formula_type=original_factor.get("formula_type", "expression")
+            formula_type=original_factor.get("formula_type", "expression"),
+            target=original_factor.get("target", DEFAULT_FACTOR_TARGET),
+            frequency=original_factor.get("frequency", DEFAULT_FREQUENCY),
         )
 
         return {

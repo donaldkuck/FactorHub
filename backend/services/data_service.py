@@ -8,6 +8,7 @@ import pandas as pd
 import akshare as ak
 
 from backend.core.settings import settings
+from backend.core.factor_targets import DEFAULT_FREQUENCY, validate_frequency
 from backend.services.cache_service import cache_service
 from backend.services.data_preprocessing_service import data_preprocessing_service
 
@@ -21,14 +22,28 @@ class DataService:
         self.cache_service = cache_service
         self.preprocessing = data_preprocessing_service
 
-    def _get_cache_key(self, stock_code: str, start_date: str, end_date: str) -> str:
+    def _get_cache_key(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = DEFAULT_FREQUENCY,
+        adjust: str = "qfq",
+    ) -> str:
         """生成缓存键"""
-        cache_key = f"{stock_code}_{start_date}_{end_date}"
+        cache_key = f"{stock_code}_{start_date}_{end_date}_{frequency}_{adjust}"
         return hashlib.md5(cache_key.encode()).hexdigest()
 
-    def _get_cache_path(self, stock_code: str, start_date: str, end_date: str) -> Path:
+    def _get_cache_path(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = DEFAULT_FREQUENCY,
+        adjust: str = "qfq",
+    ) -> Path:
         """生成缓存文件路径（保留向后兼容）"""
-        cache_hash = self._get_cache_key(stock_code, start_date, end_date)
+        cache_hash = self._get_cache_key(stock_code, start_date, end_date, frequency, adjust)
         return self.cache_dir / f"{cache_hash}.pkl"
 
     def _load_from_cache(self, cache_key: str) -> Optional[pd.DataFrame]:
@@ -48,13 +63,34 @@ class DataService:
         end_date: str,
         use_cache: bool = True,
     ) -> pd.DataFrame:
+        """获取日频股票历史数据（兼容旧调用）"""
+        return self.get_stock_bars(
+            stock_code=stock_code,
+            start_date=start_date,
+            end_date=end_date,
+            frequency=DEFAULT_FREQUENCY,
+            adjust="qfq",
+            use_cache=use_cache,
+        )
+
+    def get_stock_bars(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = DEFAULT_FREQUENCY,
+        adjust: str = "qfq",
+        use_cache: bool = True,
+    ) -> pd.DataFrame:
         """
-        获取股票历史数据
+        获取股票K线数据，支持日频和分钟频率。
 
         Args:
             stock_code: 股票代码，如 "000001" 或 "000001.SZ"
-            start_date: 开始日期，格式 "YYYY-MM-DD"
-            end_date: 结束日期，格式 "YYYY-MM-DD"
+            start_date: 开始日期，日频格式 "YYYY-MM-DD"，分钟频率格式 "YYYY-MM-DD HH:MM:SS"
+            end_date: 结束日期，日频格式 "YYYY-MM-DD"，分钟频率格式 "YYYY-MM-DD HH:MM:SS"
+            frequency: 数据频率，"1d" 或 "60m"
+            adjust: 复权方式
             use_cache: 是否使用缓存
 
         Returns:
@@ -62,47 +98,46 @@ class DataService:
         """
         # 标准化股票代码
         stock_code = self._normalize_stock_code(stock_code)
+        frequency = validate_frequency(frequency)
 
         # 检查智能缓存
         if use_cache and settings.AKSHARE_CACHE_ENABLED:
-            cache_key = self._get_cache_key(stock_code, start_date, end_date)
+            cache_key = self._get_cache_key(stock_code, start_date, end_date, frequency, adjust)
             cached_data = self._load_from_cache(cache_key)
             if cached_data is not None:
                 return cached_data
 
         # 从 akshare 获取数据
         try:
-            if stock_code.endswith(".SH"):
-                symbol = "sh" + stock_code.replace(".SH", "")
-                df = ak.stock_zh_a_daily(
-                    symbol=symbol,
-                    start_date=start_date.replace("-", ""),
-                    end_date=end_date.replace("-", ""),
-                    adjust="qfq",  # 前复权
-                )
-            elif stock_code.endswith(".SZ"):
-                symbol = "sz" + stock_code.replace(".SZ", "")
-                df = ak.stock_zh_a_daily(
-                    symbol=symbol,
-                    start_date=start_date.replace("-", ""),
-                    end_date=end_date.replace("-", ""),
-                    adjust="qfq",
-                )
-            else:
-                # 尝试自动识别
-                # 添加市场前缀
-                if stock_code.startswith("6"):
-                    symbol = "sh" + stock_code
-                elif stock_code.startswith(("0", "3")):
-                    symbol = "sz" + stock_code
+            if frequency == DEFAULT_FREQUENCY:
+                if stock_code.endswith(".SH"):
+                    symbol = "sh" + stock_code.replace(".SH", "")
+                elif stock_code.endswith(".SZ"):
+                    symbol = "sz" + stock_code.replace(".SZ", "")
                 else:
-                    symbol = stock_code
+                    # 尝试自动识别
+                    if stock_code.startswith("6"):
+                        symbol = "sh" + stock_code
+                    elif stock_code.startswith(("0", "3")):
+                        symbol = "sz" + stock_code
+                    else:
+                        symbol = stock_code
 
                 df = ak.stock_zh_a_daily(
                     symbol=symbol,
-                    start_date=start_date.replace("-", ""),
-                    end_date=end_date.replace("-", ""),
-                    adjust="qfq",
+                    start_date=start_date[:10].replace("-", ""),
+                    end_date=end_date[:10].replace("-", ""),
+                    adjust=adjust,
+                )
+            else:
+                symbol = stock_code.replace(".SH", "").replace(".SZ", "")
+                period = frequency.replace("m", "")
+                df = ak.stock_zh_a_hist_min_em(
+                    symbol=symbol,
+                    start_date=self._normalize_datetime_arg(start_date, market_open=True),
+                    end_date=self._normalize_datetime_arg(end_date, market_open=False),
+                    period=period,
+                    adjust=adjust,
                 )
 
             # 标准化列名
@@ -113,13 +148,21 @@ class DataService:
 
             # 保存到智能缓存
             if use_cache and settings.AKSHARE_CACHE_ENABLED:
-                cache_key = self._get_cache_key(stock_code, start_date, end_date)
+                cache_key = self._get_cache_key(stock_code, start_date, end_date, frequency, adjust)
                 self._save_to_cache(df, cache_key)
 
             return df
 
         except Exception as e:
             raise ValueError(f"获取股票 {stock_code} 数据失败: {e}")
+
+    def _normalize_datetime_arg(self, value: str, market_open: bool) -> str:
+        """Normalize AkShare minute datetime arguments."""
+        value = str(value)
+        if len(value) > 10:
+            return value.replace("T", " ")[:19]
+        suffix = "09:30:00" if market_open else "15:00:00"
+        return f"{value} {suffix}"
 
     def _normalize_stock_code(self, code: str) -> str:
         """标准化股票代码格式"""
@@ -137,6 +180,7 @@ class DataService:
         # akshare 返回的列名映射
         column_mapping = {
             "日期": "date",
+            "时间": "date",
             "开盘": "open",
             "收盘": "close",
             "最高": "high",

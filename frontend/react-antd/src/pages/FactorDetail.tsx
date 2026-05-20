@@ -15,6 +15,7 @@ import {
   DatePicker,
   Modal,
   Form,
+  Checkbox,
   Divider,
   Tabs,
   Progress,
@@ -34,6 +35,15 @@ import {
 import { WarningOutlined } from '@ant-design/icons'
 import * as echarts from 'echarts'
 import { api } from '@/services/api'
+import {
+  DEFAULT_FACTOR_TARGET,
+  DEFAULT_FREQUENCY,
+  FREQUENCIES,
+  getDefaultTargetByFrequency,
+  getFrequencyLabel,
+  getTargetLabel,
+  getTargetsByFrequency
+} from '@/constants/factorTargets'
 import './FactorDetail.css'
 import dayjs from 'dayjs'
 
@@ -45,6 +55,8 @@ interface FactorDetail {
   name: string
   code: string
   category: string
+  target?: string
+  frequency?: string
   source: 'preset' | 'user'
   description?: string
   is_active?: boolean
@@ -203,6 +215,9 @@ const FactorDetail: React.FC = () => {
   // 编辑相关
   const [editing, setEditing] = useState(false)
   const [editForm, setEditForm] = useState<any>({})
+  const [backfillOpen, setBackfillOpen] = useState(false)
+  const [backfillLoading, setBackfillLoading] = useState(false)
+  const [backfillForm] = Form.useForm()
 
   // 行情图表相关
   const [chartData, setChartData] = useState<ChartData | null>(null)
@@ -242,8 +257,6 @@ const FactorDetail: React.FC = () => {
   const icTimeSeriesChartRef = useRef<HTMLDivElement>(null)
   const eventResponseChartRef = useRef<HTMLDivElement>(null)
   const decayCurveChartRef = useRef<HTMLDivElement>(null)
-  const alphaBetaChartRef = useRef<HTMLDivElement>(null)
-  const returnDecompositionChartRef = useRef<HTMLDivElement>(null)
   const rollingBandChartRef = useRef<HTMLDivElement>(null)
   const transitionMatrixRef = useRef<HTMLDivElement>(null)
   const structuralBreakChartRef = useRef<HTMLDivElement>(null)
@@ -300,7 +313,9 @@ const FactorDetail: React.FC = () => {
         factor_name: factor.name,
         stock_codes: [stockCode],
         start_date: startDate,
-        end_date: endDate
+        end_date: endDate,
+        target: factor.target || DEFAULT_FACTOR_TARGET,
+        frequency: factor.frequency || DEFAULT_FREQUENCY
       } as any) as any
 
       if (response.success && response.data) {
@@ -353,6 +368,8 @@ const FactorDetail: React.FC = () => {
     setEditForm({
       name: factor.name,
       category: factor.category,
+      frequency: factor.frequency || DEFAULT_FREQUENCY,
+      target: factor.target || DEFAULT_FACTOR_TARGET,
       description: factor.description || '',
       code: factor.code,
       formula_type: (factor as any).formula_type || 'expression'
@@ -369,7 +386,7 @@ const FactorDetail: React.FC = () => {
     try {
       const validateResponse = await api.validateFactor({
         code: editForm.code,
-        formula_type: 'expression'
+        formula_type: editForm.formula_type || 'expression'
       } as any) as any
 
       if (!validateResponse.success) {
@@ -380,6 +397,8 @@ const FactorDetail: React.FC = () => {
       const updateResponse = await api.updateFactor(factor.id, {
         name: editForm.name,
         category: editForm.category,
+        frequency: editForm.frequency || DEFAULT_FREQUENCY,
+        target: editForm.target || DEFAULT_FACTOR_TARGET,
         description: editForm.description,
         code: editForm.code
       } as any) as any
@@ -419,6 +438,54 @@ const FactorDetail: React.FC = () => {
       }
     } catch (error) {
       message.error('验证失败')
+    }
+  }
+
+  const openBackfillModal = () => {
+    const startDate = customStartDate || dayjs().subtract(1, 'year').format('YYYY-MM-DD')
+    const endDate = customEndDate || dayjs().format('YYYY-MM-DD')
+    backfillForm.setFieldsValue({
+      stock_code: stockCodeDisplay,
+      date_range: [dayjs(startDate), dayjs(endDate)],
+      force: false
+    })
+    setBackfillOpen(true)
+  }
+
+  const normalizeStockCode = (value: string) => {
+    const cleanCode = value.trim().toUpperCase()
+    if (cleanCode.endsWith('.SH') || cleanCode.endsWith('.SZ')) {
+      return cleanCode
+    }
+    return cleanCode.startsWith('6') ? `${cleanCode}.SH` : `${cleanCode}.SZ`
+  }
+
+  const handleBackfillFactorValues = async () => {
+    if (!factor) return
+
+    try {
+      const values = await backfillForm.validateFields()
+      const [startDate, endDate] = values.date_range
+      setBackfillLoading(true)
+      const response = await api.backfillFactorValues(factor.id, {
+        stock_codes: [normalizeStockCode(values.stock_code)],
+        start_date: startDate.format('YYYY-MM-DD'),
+        end_date: endDate.format('YYYY-MM-DD'),
+        frequency: factor.frequency || DEFAULT_FREQUENCY,
+        force: values.force || false
+      }) as any
+
+      if (response.success) {
+        message.success(`已写入 ${response.data?.written_count || 0} 条因子值缓存`)
+        setBackfillOpen(false)
+      } else {
+        message.error(response.message || '因子值回填失败')
+      }
+    } catch (error: any) {
+      if (error?.errorFields) return
+      message.error(error.message || '因子值回填失败')
+    } finally {
+      setBackfillLoading(false)
     }
   }
 
@@ -896,7 +963,6 @@ const FactorDetail: React.FC = () => {
     console.log('drawScatterChart: scatterData', scatterData)
     const x = scatterData.x || []
     const y = scatterData.y || []
-    const correlation = scatterData.correlation || 0
     console.log('drawScatterChart: x, y lengths', { xLength: x.length, yLength: y.length })
 
     const option: echarts.EChartsOption = {
@@ -1526,9 +1592,6 @@ const FactorDetail: React.FC = () => {
     const displayFreqs = frequencies.slice(0, halfLen)
     const displayPowers = powers.slice(0, halfLen)
 
-    // 转换频率为周期（天数）
-    const periods = displayFreqs.map((f: number) => (f > 0 ? 1 / f : 0))
-
     const option: echarts.EChartsOption = {
       title: {
         text: '功率谱（频域分析）',
@@ -1678,7 +1741,12 @@ const FactorDetail: React.FC = () => {
 
     setLoadingChart(true)
     try {
-      const stockResponse = await api.getStockData(stockCode, startDate, endDate) as any
+      const stockResponse = await api.getStockData(
+        stockCode,
+        startDate,
+        endDate,
+        factor.frequency || DEFAULT_FREQUENCY
+      ) as any
 
       if (!stockResponse || !stockResponse.data) {
         message.warning('未获取到股票数据')
@@ -1955,10 +2023,10 @@ const FactorDetail: React.FC = () => {
       const basePrice = displayStock[0]?.close || 1
       const baseFactor = displayFactorValues[0] || 1
 
-      const normalizedPrices = displayStock.map((d, i) =>
+      const normalizedPrices = displayStock.map(d =>
         ((d.close - basePrice) / basePrice * 100).toFixed(2)
       )
-      const normalizedFactors = displayFactorValues.map((v: any, i: number) =>
+      const normalizedFactors = displayFactorValues.map((v: any) =>
         ((v - baseFactor) / Math.abs(baseFactor) * 100).toFixed(2)
       )
 
@@ -2211,23 +2279,6 @@ const FactorDetail: React.FC = () => {
     myChart.setOption(option, true)
   }, [chartData, factorChartType])
 
-  // 获取IC统计数据
-  const getICStats = () => {
-    if (!analysisData?.ic?.data?.ic_stats) {
-      return null
-    }
-
-    const stats = analysisData.ic.data.ic_stats
-    const factorNames = Object.keys(stats)
-
-    if (factorNames.length === 0) {
-      return null
-    }
-
-    const factorName = factorNames[0]
-    return stats[factorName] || null
-  }
-
   // 初始加载
   useEffect(() => {
     loadFactorDetail()
@@ -2357,8 +2408,6 @@ const FactorDetail: React.FC = () => {
     }
   }, [])
 
-  const icStats = getICStats()
-
   return (
     <div className="factor-detail-container">
       {/* 背景装饰 */}
@@ -2424,6 +2473,13 @@ const FactorDetail: React.FC = () => {
                         </Button>
                       </>
                     )}
+                    <Button
+                      icon={<ReloadOutlined />}
+                      onClick={openBackfillModal}
+                      block
+                    >
+                      扩充因子值
+                    </Button>
                   </Space>
                 </div>
                 <Divider />
@@ -2435,6 +2491,14 @@ const FactorDetail: React.FC = () => {
                   <div className="info-item">
                     <span className="label">分类标签:</span>
                     <div className="value"><Tag color="blue">{factor.category}</Tag></div>
+                  </div>
+                  <div className="info-item">
+                    <span className="label">数据频率:</span>
+                    <div className="value"><Tag color="cyan">{getFrequencyLabel(factor.frequency || DEFAULT_FREQUENCY)}</Tag></div>
+                  </div>
+                  <div className="info-item">
+                    <span className="label">预测目标:</span>
+                    <div className="value"><Tag color="purple">{getTargetLabel(factor.target)}</Tag></div>
                   </div>
                   <div className="info-item">
                     <span className="label">来源:</span>
@@ -3352,6 +3416,42 @@ const FactorDetail: React.FC = () => {
         )}
       </Row>
 
+      {/* 因子值回填弹窗 */}
+      <Modal
+        title="扩充因子值"
+        open={backfillOpen}
+        onCancel={() => setBackfillOpen(false)}
+        onOk={handleBackfillFactorValues}
+        confirmLoading={backfillLoading}
+        destroyOnHidden
+      >
+        <Form form={backfillForm} layout="vertical">
+          <Form.Item label="数据频率">
+            <Tag color="cyan">{getFrequencyLabel(factor?.frequency || DEFAULT_FREQUENCY)}</Tag>
+          </Form.Item>
+
+          <Form.Item
+            label="股票代码"
+            name="stock_code"
+            rules={[{ required: true, message: '请输入股票代码' }]}
+          >
+            <Input placeholder="例如：000001 或 000001.SZ" />
+          </Form.Item>
+
+          <Form.Item
+            label="日期范围"
+            name="date_range"
+            rules={[{ required: true, message: '请选择日期范围' }]}
+          >
+            <RangePicker style={{ width: '100%' }} />
+          </Form.Item>
+
+          <Form.Item name="force" valuePropName="checked">
+            <Checkbox>强制重算已有缓存</Checkbox>
+          </Form.Item>
+        </Form>
+      </Modal>
+
       {/* 编辑因子弹窗 */}
       <Modal
         title="编辑因子"
@@ -3389,6 +3489,42 @@ const FactorDetail: React.FC = () => {
               <Option value="成交量">成交量</Option>
               <Option value="波动率">波动率</Option>
               <Option value="自定义">自定义</Option>
+            </Select>
+          </Form.Item>
+
+          <Form.Item
+            label="数据频率"
+            required
+            style={{ marginBottom: 16 }}
+          >
+            <Select
+              value={editForm.frequency || DEFAULT_FREQUENCY}
+              onChange={(value) => setEditForm({
+                ...editForm,
+                frequency: value,
+                target: getDefaultTargetByFrequency(value)
+              })}
+              placeholder="请选择数据频率"
+            >
+              {FREQUENCIES.map(item => (
+                <Option key={item.value} value={item.value}>{item.label}</Option>
+              ))}
+            </Select>
+          </Form.Item>
+
+          <Form.Item
+            label="预测目标"
+            required
+            style={{ marginBottom: 16 }}
+          >
+            <Select
+              value={editForm.target || DEFAULT_FACTOR_TARGET}
+              onChange={(value) => setEditForm({ ...editForm, target: value })}
+              placeholder="请选择预测目标"
+            >
+              {getTargetsByFrequency(editForm.frequency || DEFAULT_FREQUENCY).map(target => (
+                <Option key={target.value} value={target.value}>{target.label}</Option>
+              ))}
             </Select>
           </Form.Item>
 

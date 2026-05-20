@@ -12,12 +12,24 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 router = APIRouter()
 
+from backend.core.factor_targets import (
+    DEFAULT_FACTOR_TARGET,
+    DEFAULT_FREQUENCY,
+    add_target_return_column,
+    validate_factor_target,
+    validate_frequency,
+)
+from backend.core.stock_pools import CUSTOM_STOCK_POOL, resolve_stock_codes
+from backend.services.factor_dataset_service import factor_dataset_service
+
 
 # ========== 数据模型 ==========
 
 class GeneticMiningRequest(BaseModel):
     """遗传算法挖掘请求"""
-    stock_code: str
+    stock_code: Optional[str] = None
+    stock_codes: Optional[List[str]] = None
+    stock_pool: str = CUSTOM_STOCK_POOL
     base_factors: List[str] = []  # 基础因子列表
     start_date: str
     end_date: str
@@ -28,6 +40,67 @@ class GeneticMiningRequest(BaseModel):
     elite_size: int = 5
     fitness_objective: str = "ic_mean"
     ic_threshold: float = 0.03
+    target: str = DEFAULT_FACTOR_TARGET
+    frequency: str = DEFAULT_FREQUENCY
+
+    def normalized_stock_codes(self) -> List[str]:
+        """Resolve concrete stock codes, keeping stock_code backward compatibility."""
+        raw_codes = self.stock_codes if self.stock_codes else ([self.stock_code] if self.stock_code else [])
+        return resolve_stock_codes(self.stock_pool, raw_codes)
+
+    def primary_stock_code(self) -> str:
+        """First stock code used for backward-compatible naming."""
+        return self.normalized_stock_codes()[0]
+
+
+def _build_result_data(
+    result: dict,
+    n_generations: int,
+    target: str,
+    frequency: str,
+    stock_codes: List[str],
+) -> dict:
+    """Convert mining service output into API result shape."""
+    best_factors = result.get("best_factors", [])
+    discovered_factors = []
+
+    for i, factor_info in enumerate(best_factors):
+        validation = factor_info.get("validation", {})
+        ic = validation.get("ic_validation", {}).get("ic", 0.0)
+        ir = validation.get("ir_validation", {}).get("ir", 0.0)
+        fitness = factor_info.get("fitness", 0.0)
+
+        discovered_factors.append({
+            "name": f"Mined_Factor_{i+1}",
+            "expression": factor_info["expression"],
+            "ic": float(ic) if ic else 0.0,
+            "ir": float(ir) if ir else 0.0,
+            "fitness": float(fitness),
+            "target": target,
+            "frequency": frequency,
+            "per_stock_metrics": validation.get("per_stock_metrics", {}),
+        })
+
+    logbook = result.get("logbook")
+    if logbook is not None:
+        fitness_history = {
+            "best": [float(gen["max"]) for gen in logbook],
+            "average": [float(gen["avg"]) for gen in logbook]
+        }
+    else:
+        fitness_history = {"best": [], "average": []}
+
+    return {
+        "factors": discovered_factors,
+        "best_fitness": float(discovered_factors[0]["fitness"]) if discovered_factors else 0.0,
+        "avg_fitness": sum(f["fitness"] for f in discovered_factors) / len(discovered_factors) if discovered_factors else 0.0,
+        "generations": n_generations,
+        "fitness_history": fitness_history,
+        "target": target,
+        "frequency": frequency,
+        "stock_codes": stock_codes,
+        "stock_count": len(stock_codes),
+    }
 
 
 # ========== 任务存储（内存） ==========
@@ -40,6 +113,10 @@ mining_tasks = {}
 async def start_genetic_mining(request: GeneticMiningRequest, background_tasks: BackgroundTasks):
     """启动遗传算法挖掘"""
     try:
+        frequency = validate_frequency(request.frequency)
+        validate_factor_target(request.target, frequency)
+        request.normalized_stock_codes()
+
         # 生成任务ID
         import uuid
         task_id = str(uuid.uuid4())
@@ -67,6 +144,8 @@ async def start_genetic_mining(request: GeneticMiningRequest, background_tasks: 
             },
             "message": "挖掘任务已启动"
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -78,8 +157,11 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
         logger = logging.getLogger(__name__)
 
         logger.info(f"Starting mining task {task_id}")
-        logger.info(f"Stock: {request.stock_code}, Base factors: {request.base_factors}")
+        stock_codes = request.normalized_stock_codes()
+        logger.info(f"Stocks: {stock_codes}, Base factors: {request.base_factors}")
         logger.info(f"Parameters: population={request.population_size}, generations={request.n_generations}")
+        frequency = validate_frequency(request.frequency)
+        target = validate_factor_target(request.target, frequency)
 
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
@@ -90,27 +172,34 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
         mining_tasks[task_id]["status"] = "running"
         logger.info(f"Task {task_id} status set to running")
 
-        # 获取数据
-        data = data_service.get_stock_data(
-            request.stock_code,
-            request.start_date,
-            request.end_date
-        )
+        # 获取股票池数据，保留单股粒度
+        data_by_stock = {}
+        for stock_code in stock_codes:
+            stock_data = data_service.get_stock_bars(
+                stock_code,
+                request.start_date,
+                request.end_date,
+                frequency=frequency,
+            )
+            if stock_data is None or len(stock_data) == 0:
+                logger.warning(f"No valid data for stock {stock_code}")
+                continue
+            add_target_return_column(stock_data, target)
+            data_by_stock[stock_code] = stock_data
 
-        if data is None or len(data) == 0:
+        if not data_by_stock:
             raise Exception("未获取到有效数据")
 
-        logger.info(f"Retrieved {len(data)} rows of data")
-
-        # 计算收益率
-        if "close" in data.columns:
-            data["return"] = data["close"].pct_change()
+        data = next(iter(data_by_stock.values())) if len(data_by_stock) == 1 else data_by_stock
+        logger.info(f"Retrieved data for {len(data_by_stock)} stocks")
 
         # 获取基础因子列表
         # 前端传递的是因子名称，需要从数据库获取因子代码
         base_factor_codes = []
+        selected_factor_ids = []
         if request.base_factors and len(request.base_factors) > 0:
             # 从数据库获取因子定义
+            db = None
             try:
                 from backend.repositories.factor_repository import FactorRepository
                 db = get_db_session()
@@ -119,17 +208,36 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
                 for factor_name in request.base_factors:
                     factor = repo.get_by_name(factor_name)
                     if factor:
+                        selected_factor_ids.append(factor.id)
                         base_factor_codes.append(factor.code)
                         logger.info(f"Found factor: {factor_name} -> {factor.code}")
                     else:
                         logger.warning(f"Factor not found in database: {factor_name}")
 
-                db.close()
+                for factor_id in selected_factor_ids:
+                    try:
+                        factor_dataset_service.backfill_factor_values(
+                            db=db,
+                            factor_id=factor_id,
+                            stock_codes=list(data_by_stock.keys()),
+                            start_date=request.start_date,
+                            end_date=request.end_date,
+                            frequency=frequency,
+                        )
+                    except Exception as cache_error:
+                        logger.warning(f"Factor value cache warmup failed for factor {factor_id}: {cache_error}")
             except Exception as e:
+                if isinstance(e, ValueError):
+                    raise
                 logger.error(f"Error loading factors from database: {e}")
+            finally:
+                if db:
+                    db.close()
 
         # 如果没有找到任何因子，使用默认的基础因子代码
         if not base_factor_codes:
+            if request.base_factors:
+                raise ValueError("未找到有效基础因子")
             logger.warning("No valid base factors found, using default codes")
             base_factor_codes = [
                 "RSI(close, 14)",
@@ -141,6 +249,25 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
         else:
             logger.info(f"Using {len(base_factor_codes)} base factor codes")
 
+        db = None
+        try:
+            db = get_db_session()
+            factor_dataset_service.backfill_target_returns(
+                db=db,
+                target=target,
+                stock_codes=list(data_by_stock.keys()),
+                start_date=request.start_date,
+                end_date=request.end_date,
+                frequency=frequency,
+            )
+        except Exception as cache_error:
+            logger.warning(f"Target return cache warmup failed for {target}: {cache_error}")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
         # 尝试使用真实的遗传算法
         try:
             from backend.services.genetic_factor_mining_service import create_genetic_mining_service
@@ -151,12 +278,13 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
             mining_service = create_genetic_mining_service(
                 base_factors=base_factor_codes,
                 data=data,
-                return_column="return",
+                return_column=target,
                 population_size=request.population_size,
                 n_generations=request.n_generations,
                 cx_prob=request.cx_prob,
                 mut_prob=request.mut_prob,
                 factor_calculator=factor_service.calculator,
+                target=target,
             )
 
             # 设置进度回调以实时更新任务状态
@@ -184,57 +312,38 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
             if not result.get("success"):
                 raise Exception(result.get("message", "挖掘失败"))
 
-            # 转换结果格式
-            best_factors = result.get("best_factors", [])
-
-            discovered_factors = []
-            for i, factor_info in enumerate(best_factors):
-                # 获取验证信息（如果有）
-                validation = factor_info.get("validation", {})
-                ic = validation.get("ic_validation", {}).get("ic", 0.0)
-                ir = validation.get("ir_validation", {}).get("ir", 0.0)
-                fitness = factor_info.get("fitness", 0.0)
-
-                discovered_factors.append({
-                    "name": f"Mined_Factor_{i+1}",
-                    "expression": factor_info["expression"],
-                    "ic": float(ic) if ic else 0.0,
-                    "ir": float(ir) if ir else 0.0,
-                    "fitness": float(fitness),
-                })
-
-            # 从logbook中提取fitness_history
-            logbook = result.get("logbook")
-            if logbook is not None:
-                fitness_history = {
-                    "best": [float(gen["max"]) for gen in logbook],
-                    "average": [float(gen["avg"]) for gen in logbook]
-                }
-            else:
-                fitness_history = {"best": [], "average": []}
-
-            result_data = {
-                "factors": discovered_factors,
-                "best_fitness": float(discovered_factors[0]["fitness"]) if discovered_factors else 0.0,
-                "avg_fitness": sum(f["fitness"] for f in discovered_factors) / len(discovered_factors) if discovered_factors else 0.0,
-                "generations": request.n_generations,
-                "fitness_history": fitness_history
-            }
+            result_data = _build_result_data(
+                result=result,
+                n_generations=request.n_generations,
+                target=target,
+                frequency=frequency,
+                stock_codes=list(data_by_stock.keys()),
+            )
 
             # 保存结果
             mining_tasks[task_id]["status"] = "completed"
             mining_tasks[task_id]["progress"] = 100
             mining_tasks[task_id]["result"] = result_data
-            mining_tasks[task_id]["fitness_history"] = fitness_history
+            mining_tasks[task_id]["fitness_history"] = result_data["fitness_history"]
 
             logger.info(f"Task {task_id} completed successfully")
-            logger.info(f"Discovered {len(discovered_factors)} factors")
+            logger.info(f"Discovered {len(result_data['factors'])} factors")
             logger.info(f"Final status: {mining_tasks[task_id]['status']}")
 
         except ImportError as e:
             # DEAP库未安装，使用模拟模式
             logger.warning(f"DEAP library not available, using simulation mode: {e}")
-            await _run_simulated_mining(task_id, request, data, base_factor_codes, factor_service, logger)
+            await _run_simulated_mining(
+                task_id,
+                request,
+                data,
+                base_factor_codes,
+                factor_service,
+                logger,
+                target,
+                frequency,
+                list(data_by_stock.keys()),
+            )
 
     except Exception as e:
         import logging
@@ -244,13 +353,34 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
         mining_tasks[task_id]["error"] = str(e)
 
 
-async def _run_simulated_mining(task_id: str, request: GeneticMiningRequest, data, base_factor_codes, factor_service, logger):
+async def _run_simulated_mining(
+    task_id: str,
+    request: GeneticMiningRequest,
+    data,
+    base_factor_codes,
+    factor_service,
+    logger,
+    target: str,
+    frequency: str,
+    stock_codes: List[str],
+):
     """模拟模式挖掘（当DEAP库未安装时使用）"""
     # 计算基础因子值（用于验证和生成）
     factor_values = {}
     for code in base_factor_codes:
         try:
-            values = factor_service.calculator.calculate(data, code)
+            if isinstance(data, dict):
+                import pandas as pd
+                stock_series = []
+                for stock_code, stock_data in data.items():
+                    values = factor_service.calculator.calculate(stock_data, code)
+                    if values is not None and len(values.dropna()) > 0:
+                        values = values.copy()
+                        values.index = [f"{stock_code}:{idx}" for idx in values.index]
+                        stock_series.append(values)
+                values = None if not stock_series else pd.concat(stock_series)
+            else:
+                values = factor_service.calculator.calculate(data, code)
             if values is not None and len(values.dropna()) > 0:
                 factor_values[code] = values
                 logger.info(f"Successfully calculated factor: {code}, {len(values.dropna())} valid values")
@@ -314,7 +444,9 @@ async def _run_simulated_mining(task_id: str, request: GeneticMiningRequest, dat
             "expression": expression,
             "ic": 0.03 + (i * 0.01),
             "ir": 0.5 + (i * 0.1),
-            "fitness": 0.03 + (i * 0.01)
+            "fitness": 0.03 + (i * 0.01),
+            "target": target,
+            "frequency": frequency,
         })
 
     result = {
@@ -322,7 +454,11 @@ async def _run_simulated_mining(task_id: str, request: GeneticMiningRequest, dat
         "best_fitness": discovered_factors[0]["ic"] if discovered_factors else 0,
         "avg_fitness": sum(f["fitness"] for f in discovered_factors) / len(discovered_factors) if discovered_factors else 0,
         "generations": n_generations,
-        "fitness_history": fitness_history
+        "fitness_history": fitness_history,
+        "target": target,
+        "frequency": frequency,
+        "stock_codes": stock_codes,
+        "stock_count": len(stock_codes),
     }
 
     # 保存结果

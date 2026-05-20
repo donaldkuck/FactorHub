@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   Card,
   Form,
@@ -24,16 +23,26 @@ import {
   BarChartOutlined,
   RocketOutlined,
   SyncOutlined,
-  LoadingOutlined,
-  InfoCircleOutlined,
-  CheckCircleOutlined,
-  WarningOutlined,
-  AimOutlined,
-  BulbOutlined,
   ClockCircleOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 import * as echarts from "echarts";
 import { api } from "@/services/api";
+import {
+  DEFAULT_FACTOR_TARGET,
+  DEFAULT_FREQUENCY,
+  FREQUENCIES,
+  getDefaultTargetByFrequency,
+  getFrequencyLabel,
+  getTargetLabel,
+  getTargetsByFrequency,
+} from "@/constants/factorTargets";
+import {
+  CUSTOM_STOCK_POOL,
+  DEFAULT_STOCK_POOL,
+  FALLBACK_STOCK_POOLS,
+  type StockPoolOption,
+} from "@/constants/stockPools";
 import dayjs from "dayjs";
 import "./FactorMining.css";
 
@@ -45,6 +54,8 @@ interface Factor {
   name: string;
   code: string;
   category: string;
+  target?: string;
+  frequency?: string;
   source: "preset" | "user";
   description?: string;
 }
@@ -55,6 +66,8 @@ interface MinedFactor {
   ic: number;
   ir: number;
   fitness: number;
+  target?: string;
+  frequency?: string;
 }
 
 interface MiningStatus {
@@ -76,6 +89,10 @@ interface MiningResult {
   best_fitness: number;
   avg_fitness: number;
   generations: number;
+  target?: string;
+  frequency?: string;
+  stock_codes?: string[];
+  stock_count?: number;
   fitness_history?: {
     best: number[];
     average: number[];
@@ -83,7 +100,6 @@ interface MiningResult {
 }
 
 const FactorMining: React.FC = () => {
-  const navigate = useNavigate();
   const [form] = Form.useForm();
   const evolutionChartRef = useRef<HTMLDivElement>(null);
   const resultChartRef = useRef<HTMLDivElement>(null);
@@ -94,20 +110,39 @@ const FactorMining: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [mining, setMining] = useState(false);
   const [currentStockCode, setCurrentStockCode] = useState<string>("");
+  const [stockPools, setStockPools] = useState<StockPoolOption[]>(FALLBACK_STOCK_POOLS);
+  const [selectedStockPool, setSelectedStockPool] = useState<string>(DEFAULT_STOCK_POOL);
+  const [refreshingStockPool, setRefreshingStockPool] = useState<string>("");
+  const [selectedFrequency, setSelectedFrequency] = useState<string>(DEFAULT_FREQUENCY);
+  const [selectedTarget, setSelectedTarget] = useState<string>(DEFAULT_FACTOR_TARGET);
 
   const [miningStatus, setMiningStatus] = useState<MiningStatus | null>(null);
   const [miningResult, setMiningResult] = useState<MiningResult | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0); // 挖掘已用时间（秒）
   const miningStartTimeRef = useRef<number | null>(null); // 挖掘开始时间戳
-  const elapsedTimeIntervalRef = useRef<NodeJS.Timeout | null>(null); // 计时器ID
-  const [savedFactorNames, setSavedFactorNames] = useState<Set<string>>(
+  const elapsedTimeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null); // 计时器ID
+  const [, setSavedFactorNames] = useState<Set<string>>(
     new Set(),
   ); // 已保存的因子名称
 
+  const parseStockPool = (value: string): string[] => {
+    return Array.from(
+      new Set(
+        String(value || "")
+          .split(/[\s,，;；]+/)
+          .map((item) => item.trim().toUpperCase())
+          .filter(Boolean),
+      ),
+    );
+  };
+
   // 加载因子列表
-  const loadFactors = async () => {
+  const loadFactors = async (
+    target: string = selectedTarget,
+    frequency: string = selectedFrequency,
+  ) => {
     try {
-      const response = (await api.getFactors()) as any;
+      const response = (await api.getFactors({ target, frequency })) as any;
       if (response.success) {
         setFactors(response.data);
       }
@@ -116,14 +151,48 @@ const FactorMining: React.FC = () => {
     }
   };
 
+  const loadStockPools = async () => {
+    try {
+      const response = (await api.getStockPools()) as any;
+      if (response.success && Array.isArray(response.data)) {
+        setStockPools(response.data);
+      }
+    } catch (error) {
+      console.error("加载股票池失败:", error);
+      setStockPools(FALLBACK_STOCK_POOLS);
+    }
+  };
+
+  const refreshSelectedStockPool = async () => {
+    if (selectedStockPool === CUSTOM_STOCK_POOL) {
+      return;
+    }
+    try {
+      setRefreshingStockPool(selectedStockPool);
+      const response = (await api.refreshStockPool(selectedStockPool)) as any;
+      if (response.success) {
+        message.success("股票池已刷新");
+        await loadStockPools();
+      }
+    } catch (error) {
+      console.error("刷新股票池失败:", error);
+      message.error("刷新股票池失败");
+    } finally {
+      setRefreshingStockPool("");
+    }
+  };
+
   useEffect(() => {
     loadFactors();
+    loadStockPools();
 
     // 设置默认日期范围
     const endDate = dayjs();
     const startDate = dayjs().subtract(1, "year");
     form.setFieldsValue({
       dateRange: [startDate, endDate],
+      stock_pool: DEFAULT_STOCK_POOL,
+      stock_codes: "",
       population_size: 50,
       n_generations: 10,
       mutation_rate: 0.2,
@@ -131,6 +200,8 @@ const FactorMining: React.FC = () => {
       elite_size: 5,
       fitness_objective: "ic_mean",
       ic_threshold: 0.03,
+      frequency: DEFAULT_FREQUENCY,
+      target: DEFAULT_FACTOR_TARGET,
     });
 
     return () => {
@@ -158,17 +229,33 @@ const FactorMining: React.FC = () => {
   // 开始挖掘
   const startMining = async (values: any) => {
     const selectedFactors = values.base_factors || [];
+    const stockPool = values.stock_pool || selectedStockPool || CUSTOM_STOCK_POOL;
+    const selectedStockCodes = stockPool === CUSTOM_STOCK_POOL ? parseStockPool(values.stock_codes) : [];
+    if (stockPool === CUSTOM_STOCK_POOL && selectedStockCodes.length === 0) {
+      message.warning("请至少输入一只股票");
+      return;
+    }
 
-    // 保存当前股票代码，用于后续命名
-    const stockCode = values.stock_code.replace(".", ""); // 移除股票代码中的点
+    // 保存当前股票池标签，用于后续命名
+    const stockCode = stockPool !== CUSTOM_STOCK_POOL
+      ? stockPool.toUpperCase()
+      : selectedStockCodes.length === 1
+      ? selectedStockCodes[0].replace(".", "")
+      : `POOL${selectedStockCodes.length}`;
     setCurrentStockCode(stockCode);
 
     const [startDate, endDate] = values.dateRange;
+    const frequency = values.frequency || selectedFrequency;
+    const target = values.target || selectedTarget;
     const requestData = {
-      stock_code: values.stock_code,
+      stock_pool: stockPool,
+      stock_code: selectedStockCodes[0],
+      stock_codes: selectedStockCodes,
       base_factors: selectedFactors,
       start_date: startDate.format("YYYY-MM-DD"),
       end_date: endDate.format("YYYY-MM-DD"),
+      frequency,
+      target,
       population_size: values.population_size,
       n_generations: values.n_generations,
       cx_prob: values.crossover_rate,
@@ -655,84 +742,6 @@ const FactorMining: React.FC = () => {
     }
   };
 
-  // 保存单个因子到后端（带重试机制）
-  const saveSingleFactorWithRetry = async (
-    factor: MinedFactor,
-    index: number,
-    dateStr: string,
-    stockCode: string,
-  ): Promise<{ success: boolean; name?: string; renamed?: boolean }> => {
-    const baseFactorName = `Mined_Factor_${index + 1}_${dateStr}_${stockCode}`;
-
-    for (let retry = 0; retry <= 5; retry++) {
-      const factorName =
-        retry === 0 ? baseFactorName : `${baseFactorName}_${retry}`;
-
-      try {
-        // 生成完整的因子函数代码
-        const processedExpr = factor.expression
-          .replace(/\bopen\b/g, "df['open']")
-          .replace(/\bclose\b/g, "df['close']")
-          .replace(/\bhigh\b/g, "df['high']")
-          .replace(/\blow\b/g, "df['low']")
-          .replace(/\bvolume\b/g, "df['volume']");
-
-        const factorCode = `def calculate_factor(df):
-    """
-    遗传算法挖掘因子
-    表达式: ${factor.expression}
-    IC: ${factor.ic?.toFixed(4)}
-    IR: ${factor.ir?.toFixed(4)}
-    """
-    import pandas as pd
-    import numpy as np
-
-    try:
-        result = ${processedExpr}
-        return result
-    except Exception as e:
-        return pd.Series(0, index=df.index)
-`;
-
-        const factorData = {
-          name: factorName,
-          code: factorCode,
-          category: "遗传挖掘",
-          description: `通过遗传算法挖掘的因子 | 表达式: ${factor.expression} | IC: ${factor.ic?.toFixed(4)} | IR: ${factor.ir?.toFixed(4)} | 适应度: ${factor.fitness?.toFixed(4)}`,
-          formula_type: "function",
-        };
-
-        const response = (await api.createFactor(factorData)) as any;
-
-        if (response.success) {
-          return {
-            success: true,
-            name: factorName,
-            renamed: retry > 0,
-          };
-        }
-      } catch (error: any) {
-        const errorMsg =
-          error.response?.data?.detail ||
-          error.response?.data?.message ||
-          error.message ||
-          "未知错误";
-
-        // 如果是"已存在"错误且还可以重试，继续循环
-        if (errorMsg.includes("已存在") && retry < 5) {
-          console.log(
-            `因子 ${factorName} 已存在，下一次尝试使用: ${baseFactorName}_${retry + 1}`,
-          );
-          continue;
-        } else {
-          return { success: false };
-        }
-      }
-    }
-
-    return { success: false };
-  };
-
   // 保存全部因子
   const saveAllFactors = async () => {
     if (
@@ -860,6 +869,8 @@ const FactorMining: React.FC = () => {
     }
   };
 
+  const currentStockPoolOption = stockPools.find((item) => item.key === selectedStockPool);
+
   return (
     <div className="factor-mining-container">
       {/* 背景 */}
@@ -893,13 +904,72 @@ const FactorMining: React.FC = () => {
                 </Divider>
 
                 <Form.Item
-                  label="股票代码"
-                  name="stock_code"
-                  initialValue="000001"
-                  rules={[{ required: true, message: "请输入股票代码" }]}
+                  label="股票池来源"
+                  name="stock_pool"
+                  initialValue={DEFAULT_STOCK_POOL}
+                  rules={[{ required: true, message: "请选择股票池" }]}
                 >
-                  <Input placeholder="例如：000001、600000" />
+                  <Select
+                    placeholder="请选择股票池"
+                    onChange={(value) => setSelectedStockPool(value)}
+                    dropdownRender={(menu) => (
+                      <>
+                        {menu}
+                        {selectedStockPool !== CUSTOM_STOCK_POOL && (
+                          <>
+                            <Divider style={{ margin: "8px 0" }} />
+                            <Button
+                              type="text"
+                              icon={<ReloadOutlined />}
+                              loading={refreshingStockPool === selectedStockPool}
+                              onClick={refreshSelectedStockPool}
+                              style={{ width: "100%", textAlign: "left" }}
+                            >
+                              刷新当前股票池
+                            </Button>
+                          </>
+                        )}
+                      </>
+                    )}
+                  >
+                    {stockPools.map((pool) => (
+                      <Option key={pool.key} value={pool.key}>
+                        <Space>
+                          <span>{pool.label}</span>
+                          {!pool.is_custom && pool.stock_count ? (
+                            <Tag>{pool.stock_count}</Tag>
+                          ) : null}
+                        </Space>
+                      </Option>
+                    ))}
+                  </Select>
                 </Form.Item>
+
+                {selectedStockPool !== CUSTOM_STOCK_POOL && currentStockPoolOption && (
+                  <Alert
+                    type={currentStockPoolOption.stock_count ? "info" : "warning"}
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message={
+                      currentStockPoolOption.stock_count
+                        ? `${currentStockPoolOption.label}：${currentStockPoolOption.stock_count} 只股票，成分日期 ${currentStockPoolOption.trade_date || "未知"}`
+                        : `${currentStockPoolOption.label} 暂无本地成分股，请先刷新股票池`
+                    }
+                  />
+                )}
+
+                {selectedStockPool === CUSTOM_STOCK_POOL && (
+                  <Form.Item
+                    label="自定义股票"
+                    name="stock_codes"
+                    rules={[{ required: true, message: "请输入股票池" }]}
+                  >
+                    <Input.TextArea
+                      rows={4}
+                      placeholder={"例如：\n000001\n600000\n000002.SZ"}
+                    />
+                  </Form.Item>
+                )}
 
                 <Form.Item
                   label="日期范围"
@@ -907,6 +977,53 @@ const FactorMining: React.FC = () => {
                   rules={[{ required: true, message: "请选择日期范围" }]}
                 >
                   <RangePicker style={{ width: "100%" }} />
+                </Form.Item>
+
+                <Form.Item
+                  label="数据频率"
+                  name="frequency"
+                  rules={[{ required: true, message: "请选择数据频率" }]}
+                >
+                  <Select
+                    placeholder="请选择数据频率"
+                    onChange={(value) => {
+                      const nextTarget = getDefaultTargetByFrequency(value);
+                      setSelectedFrequency(value);
+                      setSelectedTarget(nextTarget);
+                      form.setFieldsValue({
+                        target: nextTarget,
+                        base_factors: [],
+                      });
+                      loadFactors(nextTarget, value);
+                    }}
+                  >
+                    {FREQUENCIES.map((item) => (
+                      <Option key={item.value} value={item.value}>
+                        {item.label}
+                      </Option>
+                    ))}
+                  </Select>
+                </Form.Item>
+
+                <Form.Item
+                  label="预测目标"
+                  name="target"
+                  rules={[{ required: true, message: "请选择预测目标" }]}
+                >
+                  <Select
+                    placeholder="请选择预测目标"
+                    onChange={(value) => {
+                      setSelectedTarget(value);
+                      form.setFieldsValue({ base_factors: [] });
+                      loadFactors(value, selectedFrequency);
+                    }}
+                  >
+                    {getTargetsByFrequency(selectedFrequency).map((target) => (
+                      <Option key={target.value} value={target.value}>
+                        {target.label}
+                      </Option>
+                    ))}
+                  </Select>
                 </Form.Item>
 
                 {/* 基础因子选择 */}
@@ -917,15 +1034,10 @@ const FactorMining: React.FC = () => {
                   基础因子选择
                 </Divider>
                 <p className="text-hint">
-                  选择作为遗传算法输入的基础因子（可搜索因子名称）
+                  选择作为遗传算法输入的基础因子（可选，不选时使用默认技术表达式）
                 </p>
 
-                <Form.Item
-                  name="base_factors"
-                  rules={[
-                    { required: true, message: "请至少选择一个基础因子" },
-                  ]}
-                >
+                <Form.Item name="base_factors">
                   <Select
                     mode="multiple"
                     placeholder="输入因子名称搜索，如：RSI、MACD、SMA"
@@ -942,7 +1054,7 @@ const FactorMining: React.FC = () => {
                     optionLabelProp="label"
                     maxTagCount="responsive"
                     size="large"
-                    classNames={{ popup: "factor-select-dropdown" }}
+                    classNames={{ popup: { root: "factor-select-dropdown" } }}
                     listHeight={400}
                   >
                     {factors.map((factor) => (
@@ -1322,7 +1434,7 @@ const FactorMining: React.FC = () => {
                   {/* 挖掘摘要 */}
                   <div className="result-summary" style={{ marginBottom: 24 }}>
                     <Row gutter={16}>
-                      <Col span={8}>
+                      <Col span={6}>
                         <div className="stat-item">
                           <p className="stat-label">总代数</p>
                           <p className="stat-value">
@@ -1330,7 +1442,7 @@ const FactorMining: React.FC = () => {
                           </p>
                         </div>
                       </Col>
-                      <Col span={8}>
+                      <Col span={6}>
                         <div className="stat-item">
                           <p className="stat-label">最优适应度</p>
                           <p className="stat-value stat-primary">
@@ -1338,11 +1450,19 @@ const FactorMining: React.FC = () => {
                           </p>
                         </div>
                       </Col>
-                      <Col span={8}>
+                      <Col span={6}>
                         <div className="stat-item">
                           <p className="stat-label">发现因子数</p>
                           <p className="stat-value">
                             {miningResult.factors?.length || 0}
+                          </p>
+                        </div>
+                      </Col>
+                      <Col span={6}>
+                        <div className="stat-item">
+                          <p className="stat-label">股票数</p>
+                          <p className="stat-value">
+                            {miningResult.stock_count || miningResult.stock_codes?.length || 1}
                           </p>
                         </div>
                       </Col>
@@ -1379,6 +1499,12 @@ const FactorMining: React.FC = () => {
                             <div className="factor-info">
                               <Space>
                                 <Tag color="blue">Top {index + 1}</Tag>
+                                <Tag color="cyan">
+                                  {getFrequencyLabel(factor.frequency || miningResult.frequency || selectedFrequency)}
+                                </Tag>
+                                <Tag color="purple">
+                                  {getTargetLabel(factor.target || miningResult.target || selectedTarget)}
+                                </Tag>
                                 <span className="factor-name">
                                   {factor.name || `Factor_${index + 1}`}
                                 </span>

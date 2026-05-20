@@ -101,6 +101,8 @@ export const api = {
     stock_codes: string[]
     start_date: string
     end_date: string
+    target?: string
+    frequency?: string
   }) {
     return request.post('/analysis/ic', data)
   },
@@ -116,9 +118,9 @@ export const api = {
   },
 
   // 获取股票数据
-  getStockData(code: string, startDate: string, endDate: string) {
+  getStockData(code: string, startDate: string, endDate: string, frequency?: string) {
     return request.get(`/data/stock/${code}`, {
-      params: { start_date: startDate, end_date: endDate }
+      params: { start_date: startDate, end_date: endDate, frequency }
     })
   },
 
@@ -192,12 +194,71 @@ export const api = {
     return request.post('/analysis/monitoring', data)
   },
 
+  // 回填因子值缓存
+  backfillFactorValues(id: number, data: {
+    stock_codes: string[]
+    start_date: string
+    end_date: string
+    frequency?: string
+    force?: boolean
+  }) {
+    return request.post(`/factors/${id}/backfill-values`, data)
+  },
+
+  // 获取因子值缓存
+  getFactorValues(id: number, params: {
+    stock_code: string
+    start_date: string
+    end_date: string
+    frequency?: string
+  }) {
+    return request.get(`/factors/${id}/values`, { params })
+  },
+
+  // 回填 target 收益缓存
+  backfillTargetReturns(target: string, data: {
+    stock_codes: string[]
+    start_date: string
+    end_date: string
+    frequency?: string
+    force?: boolean
+  }) {
+    return request.post(`/targets/${target}/backfill-returns`, data)
+  },
+
+  // 获取股票池
+  getStockPools(params?: { include_codes?: boolean }) {
+    return request.get('/stock-pools', { params })
+  },
+
+  // 手动刷新股票池
+  refreshStockPool(poolKey: string) {
+    return request.post(`/stock-pools/${poolKey}/refresh`, {}, { timeout: 300000 })
+  },
+
+  // 确保因子值和 target 收益 join 数据集
+  ensureFactorDataset(data: {
+    factor_id: number
+    target: string
+    frequency?: string
+    stock_codes: string[]
+    start_date: string
+    end_date: string
+    force?: boolean
+  }) {
+    return request.post('/factor-datasets/ensure', data)
+  },
+
   // 遗传算法挖掘
   startGeneticMining(data: {
-    stock_code: string
+    stock_code?: string
+    stock_codes?: string[]
+    stock_pool?: string
     base_factors: string[]
     start_date: string
     end_date: string
+    frequency: string
+    target: string
     population_size: number
     n_generations: number
     cx_prob: number

@@ -2,9 +2,10 @@
 因子相关数据模型
 """
 from datetime import datetime
-from sqlalchemy import String, DateTime, Text, Integer, Float, JSON
+from sqlalchemy import String, DateTime, Text, Integer, Float, JSON, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
+from backend.core.factor_targets import DEFAULT_FACTOR_TARGET, DEFAULT_FREQUENCY
 from backend.core.database import Base
 
 
@@ -19,6 +20,8 @@ class FactorModel(Base):
     description: Mapped[str] = mapped_column(Text, nullable="", default="")
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="user")  # preset 或 user
     category: Mapped[str] = mapped_column(String(50), nullable="", default="")  # 因子分类
+    target: Mapped[str] = mapped_column(String(50), nullable=False, default=DEFAULT_FACTOR_TARGET, index=True)
+    frequency: Mapped[str] = mapped_column(String(20), nullable=False, default=DEFAULT_FREQUENCY, index=True)
     is_active: Mapped[int] = mapped_column(Integer, default=1)  # 0: 禁用, 1: 启用
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -32,7 +35,86 @@ class FactorModel(Base):
             "description": self.description,
             "source": self.source,
             "category": self.category,
+            "target": self.target or DEFAULT_FACTOR_TARGET,
+            "frequency": self.frequency or DEFAULT_FREQUENCY,
             "is_active": bool(self.is_active),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class FactorValueCacheModel(Base):
+    """Cached factor values for one factor definition."""
+
+    __tablename__ = "factor_value_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "factor_id",
+            "factor_code_hash",
+            "stock_code",
+            "frequency",
+            "bar_time",
+            name="uq_factor_value_cache_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    factor_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    factor_code_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    stock_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    frequency: Mapped[str] = mapped_column(String(20), nullable=False, default=DEFAULT_FREQUENCY, index=True)
+    bar_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    value: Mapped[float] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def to_dict(self) -> dict:
+        """转换为字典"""
+        return {
+            "id": self.id,
+            "factor_id": self.factor_id,
+            "factor_code_hash": self.factor_code_hash,
+            "stock_code": self.stock_code,
+            "frequency": self.frequency,
+            "bar_time": self.bar_time.isoformat() if self.bar_time else None,
+            "value": self.value,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class TargetReturnCacheModel(Base):
+    """Cached target-label returns for one prediction target."""
+
+    __tablename__ = "target_return_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "target",
+            "stock_code",
+            "frequency",
+            "bar_time",
+            name="uq_target_return_cache_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    stock_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    frequency: Mapped[str] = mapped_column(String(20), nullable=False, default=DEFAULT_FREQUENCY, index=True)
+    bar_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    value: Mapped[float] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def to_dict(self) -> dict:
+        """转换为字典"""
+        return {
+            "id": self.id,
+            "target": self.target,
+            "stock_code": self.stock_code,
+            "frequency": self.frequency,
+            "bar_time": self.bar_time.isoformat() if self.bar_time else None,
+            "value": self.value,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

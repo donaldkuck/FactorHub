@@ -1,11 +1,36 @@
 """
 因子数据访问层
 """
+from datetime import date, datetime
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select, update, delete, func
 
-from backend.models.factor import FactorModel, AnalysisCacheModel
+from backend.core.factor_targets import (
+    DEFAULT_FACTOR_TARGET,
+    DEFAULT_FREQUENCY,
+    list_factor_targets,
+    validate_frequency,
+)
+from backend.models.factor import (
+    FactorModel,
+    AnalysisCacheModel,
+    FactorValueCacheModel,
+    TargetReturnCacheModel,
+)
+
+
+def _to_datetime(value) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    value_str = str(value)
+    if "T" in value_str:
+        value_str = value_str.replace("T", " ")
+    if len(value_str) <= 10:
+        return datetime.strptime(value_str[:10], "%Y-%m-%d")
+    return datetime.strptime(value_str[:19], "%Y-%m-%d %H:%M:%S")
 
 
 class FactorRepository:
@@ -14,14 +39,25 @@ class FactorRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_all(self, source: Optional[str] = None, active_only: bool = False) -> List[FactorModel]:
-        """获取所有因子"""
+    def get_all(
+        self,
+        source: Optional[str] = None,
+        active_only: bool = False,
+        target: Optional[str] = None,
+        frequency: Optional[str] = None,
+    ) -> List[FactorModel]:
+        """获取所有因子。
+
+        target/frequency are accepted for backward-compatible callers, but
+        factor definitions are intentionally not scoped to a target or bar
+        frequency. Those dimensions belong to evaluation and cached values.
+        """
         query = select(FactorModel)
         if source:
             query = query.where(FactorModel.source == source)
         if active_only:
             query = query.where(FactorModel.is_active == 1)
-        query = query.order_by(FactorModel.category, FactorModel.name)
+        query = query.order_by(FactorModel.frequency, FactorModel.target, FactorModel.category, FactorModel.name)
         return list(self.db.scalars(query).all())
 
     def get_by_id(self, factor_id: int) -> Optional[FactorModel]:
@@ -92,6 +128,17 @@ class FactorRepository:
             .where(FactorModel.is_active == 1)
         ) or 0
 
+    def count_by_target(self) -> dict:
+        """按目标统计启用因子数量"""
+        rows = self.db.execute(
+            select(FactorModel.target, func.count(FactorModel.id))
+            .where(FactorModel.is_active == 1)
+            .group_by(FactorModel.target)
+        ).all()
+        counts = {target.key: 0 for target in list_factor_targets()}
+        counts.update({target or DEFAULT_FACTOR_TARGET: count for target, count in rows})
+        return counts
+
 
 class AnalysisCacheRepository:
     """分析结果缓存数据访问类"""
@@ -130,6 +177,161 @@ class AnalysisCacheRepository:
         from datetime import datetime, timedelta
         cutoff_date = datetime.now() - timedelta(days=days)
         stmt = delete(AnalysisCacheModel).where(AnalysisCacheModel.created_at < cutoff_date)
+        result = self.db.execute(stmt)
+        self.db.commit()
+        return result.rowcount
+
+
+class FactorValueCacheRepository:
+    """因子值缓存数据访问类"""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert_values(
+        self,
+        factor_id: int,
+        factor_code_hash: str,
+        stock_code: str,
+        values: list[dict],
+        frequency: str = DEFAULT_FREQUENCY,
+        force: bool = False,
+    ) -> int:
+        """批量写入因子值。默认保留已有缓存，force=True 时覆盖。"""
+        frequency_key = validate_frequency(frequency)
+        written = 0
+        for item in values:
+            bar_time = _to_datetime(item.get("bar_time", item.get("trade_date")))
+            existing = self.db.scalar(
+                select(FactorValueCacheModel)
+                .where(FactorValueCacheModel.factor_id == factor_id)
+                .where(FactorValueCacheModel.factor_code_hash == factor_code_hash)
+                .where(FactorValueCacheModel.stock_code == stock_code)
+                .where(FactorValueCacheModel.frequency == frequency_key)
+                .where(FactorValueCacheModel.bar_time == bar_time)
+            )
+            if existing:
+                if force:
+                    existing.value = item.get("value")
+                    written += 1
+                continue
+            self.db.add(
+                FactorValueCacheModel(
+                    factor_id=factor_id,
+                    factor_code_hash=factor_code_hash,
+                    stock_code=stock_code,
+                    frequency=frequency_key,
+                    bar_time=bar_time,
+                    value=item.get("value"),
+                )
+            )
+            written += 1
+        self.db.commit()
+        return written
+
+    def get_values(
+        self,
+        factor_id: int,
+        factor_code_hash: str,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = DEFAULT_FREQUENCY,
+    ) -> list[dict]:
+        """按因子定义、股票和日期范围读取因子值缓存"""
+        frequency_key = validate_frequency(frequency)
+        rows = self.db.scalars(
+            select(FactorValueCacheModel)
+            .where(FactorValueCacheModel.factor_id == factor_id)
+            .where(FactorValueCacheModel.factor_code_hash == factor_code_hash)
+            .where(FactorValueCacheModel.stock_code == stock_code)
+            .where(FactorValueCacheModel.frequency == frequency_key)
+            .where(FactorValueCacheModel.bar_time >= _to_datetime(start_date))
+            .where(FactorValueCacheModel.bar_time <= _to_datetime(end_date))
+            .order_by(FactorValueCacheModel.bar_time)
+        ).all()
+        return [row.to_dict() for row in rows]
+
+    def delete_for_factor(self, factor_id: int, factor_code_hash: Optional[str] = None) -> int:
+        """删除某个因子的缓存，可限定到某个代码 hash"""
+        stmt = delete(FactorValueCacheModel).where(FactorValueCacheModel.factor_id == factor_id)
+        if factor_code_hash:
+            stmt = stmt.where(FactorValueCacheModel.factor_code_hash == factor_code_hash)
+        result = self.db.execute(stmt)
+        self.db.commit()
+        return result.rowcount
+
+
+class TargetReturnCacheRepository:
+    """目标收益缓存数据访问类"""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert_values(
+        self,
+        target: str,
+        stock_code: str,
+        values: list[dict],
+        frequency: str = DEFAULT_FREQUENCY,
+        force: bool = False,
+    ) -> int:
+        """批量写入 target 收益。默认保留已有缓存，force=True 时覆盖。"""
+        frequency_key = validate_frequency(frequency)
+        written = 0
+        for item in values:
+            bar_time = _to_datetime(item.get("bar_time", item.get("trade_date")))
+            existing = self.db.scalar(
+                select(TargetReturnCacheModel)
+                .where(TargetReturnCacheModel.target == target)
+                .where(TargetReturnCacheModel.stock_code == stock_code)
+                .where(TargetReturnCacheModel.frequency == frequency_key)
+                .where(TargetReturnCacheModel.bar_time == bar_time)
+            )
+            if existing:
+                if force:
+                    existing.value = item.get("value")
+                    written += 1
+                continue
+            self.db.add(
+                TargetReturnCacheModel(
+                    target=target,
+                    stock_code=stock_code,
+                    frequency=frequency_key,
+                    bar_time=bar_time,
+                    value=item.get("value"),
+                )
+            )
+            written += 1
+        self.db.commit()
+        return written
+
+    def get_values(
+        self,
+        target: str,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = DEFAULT_FREQUENCY,
+    ) -> list[dict]:
+        """按目标、股票和日期范围读取 target 收益缓存"""
+        frequency_key = validate_frequency(frequency)
+        rows = self.db.scalars(
+            select(TargetReturnCacheModel)
+            .where(TargetReturnCacheModel.target == target)
+            .where(TargetReturnCacheModel.stock_code == stock_code)
+            .where(TargetReturnCacheModel.frequency == frequency_key)
+            .where(TargetReturnCacheModel.bar_time >= _to_datetime(start_date))
+            .where(TargetReturnCacheModel.bar_time <= _to_datetime(end_date))
+            .order_by(TargetReturnCacheModel.bar_time)
+        ).all()
+        return [row.to_dict() for row in rows]
+
+    def delete_for_target(self, target: str, stock_code: Optional[str] = None) -> int:
+        """删除某个 target 的收益缓存，可限定到某只股票"""
+        stmt = delete(TargetReturnCacheModel).where(TargetReturnCacheModel.target == target)
+        if stock_code:
+            stmt = stmt.where(TargetReturnCacheModel.stock_code == stock_code)
         result = self.db.execute(stmt)
         self.db.commit()
         return result.rowcount

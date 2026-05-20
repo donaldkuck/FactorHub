@@ -28,6 +28,10 @@ from backend.services.factor_exposure_service import factor_exposure_service
 from backend.services.factor_effectiveness_service import factor_effectiveness_service
 from backend.services.factor_attribution_service import factor_attribution_service
 from backend.services.factor_monitoring_service import factor_monitoring_service
+from backend.core.database import get_db_session
+from backend.core.factor_targets import DEFAULT_FACTOR_TARGET, DEFAULT_FREQUENCY
+from backend.repositories.factor_repository import FactorRepository
+from backend.services.factor_dataset_service import factor_dataset_service
 
 router = APIRouter()
 
@@ -40,6 +44,7 @@ class CalculateRequest(BaseModel):
     stock_codes: List[str]
     start_date: str
     end_date: str
+    frequency: str = DEFAULT_FREQUENCY
 
 
 class ICAnalysisRequest(BaseModel):
@@ -48,6 +53,8 @@ class ICAnalysisRequest(BaseModel):
     stock_codes: List[str]
     start_date: str
     end_date: str
+    target: str = DEFAULT_FACTOR_TARGET
+    frequency: str = DEFAULT_FREQUENCY
 
 
 class StabilityRequest(BaseModel):
@@ -99,10 +106,11 @@ async def calculate_factor(request: CalculateRequest):
         for stock_code in request.stock_codes:
             try:
                 logger.info(f"获取股票数据: {stock_code}, 时间范围: {request.start_date} - {request.end_date}")
-                data = data_service.get_stock_data(
+                data = data_service.get_stock_bars(
                     stock_code,
                     request.start_date,
-                    request.end_date
+                    request.end_date,
+                    frequency=request.frequency,
                 )
 
                 if data is None or len(data) == 0:
@@ -128,7 +136,8 @@ async def calculate_factor(request: CalculateRequest):
 
                 # 过滤掉因子值为 NaN 的行，确保 dates 和 factor_values 一一对应
                 valid_data = data[[request.factor_name]].dropna()
-                valid_dates = valid_data.index.strftime('%Y-%m-%d').tolist()
+                date_format = "%Y-%m-%d" if request.frequency == DEFAULT_FREQUENCY else "%Y-%m-%d %H:%M:%S"
+                valid_dates = valid_data.index.strftime(date_format).tolist()
                 valid_factor_values = valid_data[request.factor_name].tolist()
 
                 # 额外检查：确保所有值都是有效的数字，转换 NaN 和 inf 为 None
@@ -200,45 +209,68 @@ async def calculate_ic(request: ICAnalysisRequest):
     logger = logging.getLogger(__name__)
 
     try:
-        logger.info(f"开始IC分析: {request.factor_name}, 股票: {request.stock_codes}, 时间: {request.start_date} - {request.end_date}")
-
-        # 先尝试使用缓存
-        result = analysis_service.analyze(
-            stock_codes=request.stock_codes,
-            factor_names=[request.factor_name],
-            start_date=request.start_date,
-            end_date=request.end_date,
-            use_cache=True,
-            rolling_window=252
+        logger.info(
+            f"开始IC分析: {request.factor_name}, target: {request.target}, "
+            f"股票: {request.stock_codes}, 时间: {request.start_date} - {request.end_date}"
         )
 
-        logger.info(f"IC分析原始结果: {result}")
+        db = get_db_session()
+        try:
+            factor = FactorRepository(db).get_by_name(request.factor_name)
+            if not factor:
+                raise HTTPException(status_code=404, detail=f"因子 '{request.factor_name}' 不存在")
 
-        # 提取 IC/IR 相关数据并简化返回格式
-        ic_ir_data = result.get("ic_ir", {})
-        ic_stats = ic_ir_data.get("ic_stats", {})
-
-        logger.info(f"提取的ic_stats: {ic_stats}")
-
-        # 如果缓存中的数据无效，重新计算
-        if not ic_stats or len(ic_stats) == 0:
-            logger.warning("缓存中的数据无效，重新计算IC分析")
-            result = analysis_service.analyze(
+            dataset = factor_dataset_service.ensure_dataset(
+                db=db,
+                factor_id=factor.id,
+                target=request.target,
+                frequency=request.frequency,
                 stock_codes=request.stock_codes,
-                factor_names=[request.factor_name],
                 start_date=request.start_date,
                 end_date=request.end_date,
-                use_cache=False,  # 不使用缓存
-                rolling_window=252
             )
+        finally:
+            db.close()
 
-            # 重新提取
-            ic_ir_data = result.get("ic_ir", {})
-            ic_stats = ic_ir_data.get("ic_stats", {})
-            logger.info(f"重新计算的ic_stats: {ic_stats}")
+        frame = pd.DataFrame(dataset["rows"])
+        if frame.empty:
+            ic_stats = {}
+        else:
+            frame = frame.dropna(subset=["factor_value", "target_return"])
+            stock_ics = []
+            for _, group in frame.groupby("stock_code"):
+                if len(group) >= 2:
+                    ic = group["factor_value"].corr(group["target_return"])
+                    if ic is not None and not np.isnan(ic):
+                        stock_ics.append(float(ic))
+
+            if stock_ics:
+                ic_mean = float(np.mean(stock_ics))
+                ic_std = float(np.std(stock_ics))
+                ic_ir = float(ic_mean / ic_std) if ic_std > 0 else 0.0
+                ic_stats = {
+                    request.factor_name: {
+                        "ic_mean": ic_mean,
+                        "ic_std": ic_std,
+                        "ic_ir": ic_ir,
+                        "ic_positive_ratio": float(sum(ic > 0 for ic in stock_ics) / len(stock_ics)),
+                        "ic_count": len(stock_ics),
+                        "sample_size": int(len(frame)),
+                    }
+                }
+            else:
+                ic_stats = {}
 
         simplified_result = {
-            "metadata": result.get("metadata", {}),
+            "metadata": {
+                "factor_name": request.factor_name,
+                "target": dataset.get("target", request.target),
+                "frequency": dataset.get("frequency", request.frequency),
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "stock_count": len(request.stock_codes),
+                "row_count": len(dataset.get("rows", [])),
+            },
             "ic_stats": ic_stats,
         }
 
@@ -255,6 +287,10 @@ async def calculate_ic(request: ICAnalysisRequest):
             "success": True,
             "data": simplified_result
         }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"IC分析失败: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"IC分析失败: {str(e)}")

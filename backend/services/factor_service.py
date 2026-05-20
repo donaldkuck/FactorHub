@@ -10,6 +10,12 @@ import yaml
 import logging
 
 from backend.core.database import get_db_session
+from backend.core.factor_targets import (
+    DEFAULT_FACTOR_TARGET,
+    DEFAULT_FREQUENCY,
+    VALID_FREQUENCIES,
+    list_factor_targets,
+)
 from backend.core.settings import settings
 from backend.models.factor import FactorModel
 from backend.repositories.factor_repository import FactorRepository
@@ -466,6 +472,8 @@ class FactorService:
                     description=factor_data.get("description", ""),
                     source="preset",
                     category=category,
+                    target=DEFAULT_FACTOR_TARGET,
+                    frequency=DEFAULT_FREQUENCY,
                     is_active=1,
                 )
                 repo.create(factor)
@@ -489,6 +497,8 @@ class FactorService:
                     description=factor_data.get("description", ""),
                     source="preset",
                     category=category,
+                    target=DEFAULT_FACTOR_TARGET,
+                    frequency=DEFAULT_FREQUENCY,
                     is_active=1,
                 )
                 repo.create(factor)
@@ -896,8 +906,12 @@ class FactorService:
             ],
         }
 
-    def get_all_factors(self) -> List[Dict]:
-        """获取所有因子"""
+    def get_all_factors(self, target: str = None, frequency: str = None) -> List[Dict]:
+        """获取所有因子。
+
+        target/frequency parameters are kept for API compatibility; factor
+        definitions are not bound to either dimension.
+        """
         db = get_db_session()
         repo = FactorRepository(db)
         factors = repo.get_all(active_only=True)
@@ -932,6 +946,18 @@ class FactorService:
             "preset_count": repo.get_preset_count(),
             "user_count": repo.get_user_count(),
             "total_count": repo.get_preset_count() + repo.get_user_count(),
+            "target_counts": repo.count_by_target(),
+            "targets": [
+                {
+                    "key": target.key,
+                    "label": target.label,
+                    "frequency": target.frequency,
+                    "horizon": target.horizon,
+                    "horizon_bars": target.horizon_bars,
+                }
+                for target in list_factor_targets()
+            ],
+            "frequencies": sorted(VALID_FREQUENCIES),
             "strategy_count": 0,  # 暂时为0，后续可以根据实际情况添加
             "stock_cache_count": stock_cache_count,
             "akshare_healthy": akshare_healthy,
@@ -941,7 +967,9 @@ class FactorService:
 
     def create_factor(
         self, name: str, code: str, description: str = "",
-        category: str = "自定义", formula_type: str = "expression"
+        category: str = "自定义", formula_type: str = "expression",
+        target: str = DEFAULT_FACTOR_TARGET,
+        frequency: str = DEFAULT_FREQUENCY,
     ) -> Dict:
         """创建用户自定义因子"""
         db = get_db_session()
@@ -970,6 +998,8 @@ class FactorService:
             description=description,
             source="user",
             category=category,
+            target=DEFAULT_FACTOR_TARGET,
+            frequency=DEFAULT_FREQUENCY,
             is_active=1,
         )
         result = repo.create(factor)
@@ -978,7 +1008,8 @@ class FactorService:
 
     def update_factor(
         self, factor_id: int, name: str = None, code: str = None, description: str = None,
-        category: str = None, create_version: bool = True, change_reason: str = ""
+        category: str = None, target: str = None, frequency: str = None,
+        create_version: bool = True, change_reason: str = ""
     ) -> Dict:
         """
         更新因子
@@ -1028,7 +1059,6 @@ class FactorService:
             factor.description = description
         if category:
             factor.category = category
-
         result = repo.update(factor)
         db.close()
         return result.to_dict()

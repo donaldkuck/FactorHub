@@ -19,6 +19,7 @@ except ImportError:
 
 from backend.services.factor_generator_service import factor_generator_service
 from backend.services.factor_validation_service import factor_validation_service
+from backend.core.factor_targets import DEFAULT_FACTOR_TARGET
 
 
 class GeneticFactorMiningService:
@@ -27,13 +28,14 @@ class GeneticFactorMiningService:
     def __init__(
         self,
         base_factors: List[str],
-        data: pd.DataFrame,
+        data: pd.DataFrame | Dict[str, pd.DataFrame],
         return_column: str = "return",
         population_size: int = 50,
         n_generations: int = 20,
         cx_prob: float = 0.7,
         mut_prob: float = 0.3,
         factor_calculator=None,
+        target: str = DEFAULT_FACTOR_TARGET,
     ):
         """
         初始化遗传算法挖掘服务
@@ -47,21 +49,24 @@ class GeneticFactorMiningService:
             cx_prob: 交叉概率
             mut_prob: 变异概率
             factor_calculator: 因子计算器实例（可选）
+            target: 因子预测目标
         """
         if not DEAP_AVAILABLE:
             raise ImportError("DEAP库未安装，请运行: pip install DEAP")
 
         self.base_factor_codes = base_factors
-        self.data = data
+        self.data_by_stock = data if isinstance(data, dict) else None
+        self.data = self._combine_pool_data(data) if isinstance(data, dict) else data
         self.return_column = return_column
         self.population_size = population_size
         self.n_generations = n_generations
         self.cx_prob = cx_prob
         self.mut_prob = mut_prob
         self.factor_calculator = factor_calculator
+        self.target = target
 
         # 准备收益率数据
-        self.return_values = data[return_column] if return_column in data.columns else None
+        self.return_values = self.data[return_column] if return_column in self.data.columns else None
 
         # 预计算基础因子值（存储为字典，方便表达式计算）
         self.base_factor_values = {}
@@ -69,6 +74,38 @@ class GeneticFactorMiningService:
 
         # 初始化遗传算法
         self._setup_genetic_algorithm()
+
+    def _combine_pool_data(self, data_by_stock: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """Combine per-stock frames without losing stock identity."""
+        frames = []
+        for stock_code, stock_df in data_by_stock.items():
+            if stock_df is None or stock_df.empty:
+                continue
+            frame = stock_df.copy()
+            frame.index = pd.MultiIndex.from_arrays(
+                [[stock_code] * len(frame), frame.index],
+                names=["stock_code", "bar_time"],
+            )
+            frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames).sort_index()
+
+    def _combine_pool_series(self, series_by_stock: Dict[str, pd.Series]) -> pd.Series:
+        """Combine per-stock series using the same stock/bar index as pool data."""
+        series_list = []
+        for stock_code, values in series_by_stock.items():
+            if values is None or values.empty:
+                continue
+            stock_series = pd.Series(values).copy()
+            stock_series.index = pd.MultiIndex.from_arrays(
+                [[stock_code] * len(stock_series), stock_series.index],
+                names=["stock_code", "bar_time"],
+            )
+            series_list.append(stock_series)
+        if not series_list:
+            return pd.Series(dtype=float)
+        return pd.concat(series_list).sort_index()
 
     def _precompute_base_factors(self):
         """预计算所有基础因子的值"""
@@ -81,7 +118,15 @@ class GeneticFactorMiningService:
 
         for i, factor_code in enumerate(self.base_factor_codes):
             try:
-                factor_values = self.factor_calculator.calculate(self.data, factor_code)
+                if self.data_by_stock:
+                    values_by_stock = {}
+                    for stock_code, stock_df in self.data_by_stock.items():
+                        stock_values = self.factor_calculator.calculate(stock_df, factor_code)
+                        if stock_values is not None and len(stock_values.dropna()) > 0:
+                            values_by_stock[stock_code] = stock_values
+                    factor_values = self._combine_pool_series(values_by_stock)
+                else:
+                    factor_values = self.factor_calculator.calculate(self.data, factor_code)
                 if factor_values is not None and len(factor_values.dropna()) > 0:
                     # 使用唯一的变量名（避免代码中的特殊字符）
                     var_name = f"factor_{i}"
@@ -99,11 +144,11 @@ class GeneticFactorMiningService:
 
     def _setup_genetic_algorithm(self):
         """设置遗传算法"""
-        # 定义适应度函数（最大化IC绝对值和IR）
-        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-
-        # 定义个体（因子表达式）
-        creator.create("Individual", list, fitness=creator.FitnessMax)
+        # 定义适应度函数和个体；DEAP creator 在进程内是全局注册的。
+        if not hasattr(creator, "FitnessMax"):
+            creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+        if not hasattr(creator, "Individual"):
+            creator.create("Individual", list, fitness=creator.FitnessMax)
 
         # 创建工具箱
         self.toolbox = base.Toolbox()
@@ -209,11 +254,7 @@ class GeneticFactorMiningService:
 
             # 验证因子
             if self.return_values is not None:
-                validation = factor_validation_service.validate_factor(
-                    factor_values=factor_values,
-                    return_values=self.return_values,
-                    existing_factors=None,
-                )
+                validation = self._validate_factor_pool(factor_values)
 
                 # 适应度 = 综合得分
                 fitness = validation["score"] / 100.0
@@ -225,6 +266,36 @@ class GeneticFactorMiningService:
 
         except Exception as e:
             return (0.0,)
+
+    def _validate_factor_pool(self, factor_values: pd.Series) -> Dict:
+        """Validate aggregate pool performance and include per-stock metrics."""
+        validation = factor_validation_service.validate_factor(
+            factor_values=factor_values,
+            return_values=self.return_values,
+            existing_factors=None,
+        )
+        validation["per_stock_metrics"] = self._calculate_per_stock_metrics(factor_values)
+        return validation
+
+    def _calculate_per_stock_metrics(self, factor_values: pd.Series) -> Dict[str, Dict]:
+        """Summarize candidate quality per stock for diagnostics."""
+        if not isinstance(factor_values.index, pd.MultiIndex) or self.return_values is None:
+            return {}
+
+        metrics = {}
+        for stock_code in factor_values.index.get_level_values("stock_code").unique():
+            stock_factor = factor_values.xs(stock_code, level="stock_code")
+            stock_return = self.return_values.xs(stock_code, level="stock_code")
+            aligned = pd.DataFrame({"factor": stock_factor, "return": stock_return}).dropna()
+            if len(aligned) < 2:
+                metrics[str(stock_code)] = {"ic": 0.0, "sample_size": int(len(aligned))}
+                continue
+            ic = aligned["factor"].corr(aligned["return"])
+            metrics[str(stock_code)] = {
+                "ic": 0.0 if pd.isna(ic) else float(ic),
+                "sample_size": int(len(aligned)),
+            }
+        return metrics
 
     def _compute_factor_expression(self, expr: str) -> Optional[pd.Series]:
         """
@@ -609,16 +680,14 @@ class GeneticFactorMiningService:
                 "expression": actual_expr,  # 使用实际代码而不是占位符
                 "placeholder_expression": placeholder_expr,  # 保留占位符表达式用于调试
                 "fitness": float(individual.fitness.values[0]),
+                "target": self.target,
             }
 
             # 重新计算详细指标
             try:
                 factor_values = self._compute_factor_expression(placeholder_expr)
                 if factor_values is not None and self.return_values is not None:
-                    validation = factor_validation_service.validate_factor(
-                        factor_values=factor_values,
-                        return_values=self.return_values,
-                    )
+                    validation = self._validate_factor_pool(factor_values)
                     factor_info["validation"] = validation
             except Exception as e:
                 # 记录个体评估失败的异常，但继续处理其他个体

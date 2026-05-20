@@ -1,13 +1,14 @@
 """
 数据库连接管理模块
 """
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 from contextlib import contextmanager
 from typing import Generator
 
 from backend.core.settings import settings
+from backend.core.factor_targets import DEFAULT_FACTOR_TARGET, DEFAULT_FREQUENCY
 
 
 # 创建数据库引擎
@@ -28,12 +29,89 @@ class Base(DeclarativeBase):
 
 def init_db() -> None:
     """初始化数据库，创建所有表"""
-    from backend.models.factor import FactorModel, AnalysisCacheModel
+    from backend.models.factor import (
+        FactorModel,
+        AnalysisCacheModel,
+        FactorValueCacheModel,
+        TargetReturnCacheModel,
+    )
     from backend.models.backtest import BacktestResultModel, TradeRecordModel
     from backend.models.cache_metadata import CacheMetadataModel
     from backend.models.factor_version import FactorVersionModel
 
     Base.metadata.create_all(bind=engine)
+    ensure_factor_target_column(engine)
+    ensure_factor_frequency_column(engine)
+    reset_legacy_factor_cache_tables(engine)
+
+
+def ensure_factor_target_column(bind) -> None:
+    """Add the factor target column for existing SQLite databases."""
+    inspector = inspect(bind)
+    if "factors" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("factors")}
+    if "target" in columns:
+        return
+
+    with bind.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE factors "
+                f"ADD COLUMN target VARCHAR(50) NOT NULL DEFAULT '{DEFAULT_FACTOR_TARGET}'"
+            )
+        )
+
+
+def ensure_factor_frequency_column(bind) -> None:
+    """Add the factor frequency column for existing SQLite databases."""
+    inspector = inspect(bind)
+    if "factors" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("factors")}
+    if "frequency" in columns:
+        return
+
+    with bind.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE factors "
+                f"ADD COLUMN frequency VARCHAR(20) NOT NULL DEFAULT '{DEFAULT_FREQUENCY}'"
+            )
+        )
+
+
+def reset_legacy_factor_cache_tables(bind) -> None:
+    """Drop old cache tables that cannot represent intraday bars.
+
+    Cache data is explicitly disposable; factor definitions are preserved.
+    """
+    required_columns = {
+        "factor_value_cache": {"factor_id", "factor_code_hash", "stock_code", "frequency", "bar_time", "value"},
+        "target_return_cache": {"target", "stock_code", "frequency", "bar_time", "value"},
+    }
+    inspector = inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+    tables_to_reset = []
+
+    for table_name, columns in required_columns.items():
+        if table_name not in existing_tables:
+            continue
+        existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if not columns.issubset(existing_columns) or "trade_date" in existing_columns:
+            tables_to_reset.append(table_name)
+
+    if not tables_to_reset:
+        return
+
+    with bind.begin() as conn:
+        for table_name in tables_to_reset:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+    for table_name in tables_to_reset:
+        Base.metadata.tables[table_name].create(bind=bind, checkfirst=True)
 
 
 @contextmanager

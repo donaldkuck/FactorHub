@@ -29,7 +29,10 @@ from .routers import (
     mining,
     portfolio,
     backtest,
-    data
+    data,
+    targets,
+    factor_datasets,
+    stock_pools,
 )
 
 
@@ -130,6 +133,9 @@ app.include_router(mining.router, prefix="/api/mining", tags=["因子挖掘"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["组合分析"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["策略回测"])
 app.include_router(data.router, prefix="/api/data", tags=["数据管理"])
+app.include_router(targets.router, prefix="/api/targets", tags=["预测目标"])
+app.include_router(factor_datasets.router, prefix="/api/factor-datasets", tags=["因子数据集"])
+app.include_router(stock_pools.router, prefix="/api/stock-pools", tags=["股票池"])
 
 
 @app.get("/api")

@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from backend.services.data_service import data_service
+from backend.core.factor_targets import DEFAULT_FREQUENCY
 
 router = APIRouter()
 
@@ -29,7 +30,9 @@ class StockDataRequest(BaseModel):
 async def get_stock_data(
     code: str,
     start_date: str,
-    end_date: str
+    end_date: str,
+    frequency: str = DEFAULT_FREQUENCY,
+    adjust: str = "qfq",
 ):
     """
     获取股票数据
@@ -40,10 +43,12 @@ async def get_stock_data(
     - end_date: 结束日期 (YYYY-MM-DD)
     """
     try:
-        data = data_service.get_stock_data(
+        data = data_service.get_stock_bars(
             stock_code=code,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            frequency=frequency,
+            adjust=adjust,
         )
 
         if data is None or len(data) == 0:

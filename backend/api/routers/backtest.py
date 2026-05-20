@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 import sys
 import numpy as np
+import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -14,8 +15,58 @@ from backend.services.vectorbt_backtest_service import VectorBTBacktestService, 
 from backend.repositories.backtest_repository import BacktestRepository
 from backend.repositories.factor_repository import FactorRepository
 from backend.core.database import get_db_session
+from backend.core.factor_targets import DEFAULT_FREQUENCY, validate_frequency
+from backend.services.factor_dataset_service import factor_dataset_service
 
 router = APIRouter()
+
+
+def _format_bar_index(index, frequency: str) -> list[str]:
+    """Format dates without losing intraday timestamps."""
+    fmt = "%Y-%m-%d" if frequency == DEFAULT_FREQUENCY else "%Y-%m-%d %H:%M:%S"
+    return index.strftime(fmt).tolist()
+
+
+def _get_cached_or_backfilled_factor_values(
+    factor_def,
+    stock_code: str,
+    start_date: str,
+    end_date: str,
+    frequency: str,
+) -> pd.Series:
+    """Read factor values from cache, backfilling only factor values when empty."""
+    db = get_db_session()
+    try:
+        series = factor_dataset_service.get_factor_value_series(
+            db=db,
+            factor_id=factor_def.id,
+            stock_code=stock_code,
+            start_date=start_date,
+            end_date=end_date,
+            frequency=frequency,
+        )
+        if series.empty:
+            factor_dataset_service.backfill_factor_values(
+                db=db,
+                factor_id=factor_def.id,
+                stock_codes=[stock_code],
+                start_date=start_date,
+                end_date=end_date,
+                frequency=frequency,
+            )
+            series = factor_dataset_service.get_factor_value_series(
+                db=db,
+                factor_id=factor_def.id,
+                stock_code=stock_code,
+                start_date=start_date,
+                end_date=end_date,
+                frequency=frequency,
+            )
+        return series
+    except Exception:
+        return pd.Series(dtype=float)
+    finally:
+        db.close()
 
 
 # ========== 数据模型 ==========
@@ -29,6 +80,7 @@ class SingleBacktestRequest(BaseModel):
     strategy_type: str = "single_factor"  # single_factor 或 multi_factor
     start_date: str
     end_date: str
+    frequency: str = DEFAULT_FREQUENCY
     initial_capital: float = 1000000
     commission_rate: float = 0.0003
     slippage: float = 0.0
@@ -46,6 +98,7 @@ class ComparisonRequest(BaseModel):
     strategies: List[Dict]  # 策略配置列表
     start_date: str
     end_date: str
+    frequency: str = DEFAULT_FREQUENCY
     initial_capital: float = 1000000
     commission_rate: float = 0.0003
     rebalance_freq: str = "monthly"
@@ -57,6 +110,7 @@ class ComparisonRequest(BaseModel):
 async def run_single_backtest(request: SingleBacktestRequest):
     """运行单策略回测"""
     try:
+        frequency = validate_frequency(request.frequency)
         if not check_vectorbt_available():
             raise HTTPException(
                 status_code=503,
@@ -98,10 +152,11 @@ async def run_single_backtest(request: SingleBacktestRequest):
         # 获取数据并计算所有因子
         all_factor_data = {}
         for stock_code in request.stock_codes:
-            stock_data = data_service.get_stock_data(
+            stock_data = data_service.get_stock_bars(
                 stock_code,
                 request.start_date,
-                request.end_date
+                request.end_date,
+                frequency=frequency,
             )
 
             if stock_data is not None and len(stock_data) > 0:
@@ -109,9 +164,19 @@ async def run_single_backtest(request: SingleBacktestRequest):
                 factor_calculator = factor_service.calculator
                 for factor_name in factor_names_to_use:
                     factor_def = factor_defs[factor_name]
-                    factor_values = factor_calculator.calculate(
-                        stock_data, factor_def.code
+                    cached_values = _get_cached_or_backfilled_factor_values(
+                        factor_def,
+                        stock_code,
+                        request.start_date,
+                        request.end_date,
+                        frequency,
                     )
+                    if not cached_values.empty:
+                        factor_values = cached_values.reindex(stock_data.index)
+                    else:
+                        factor_values = factor_calculator.calculate(
+                            stock_data, factor_def.code
+                        )
                     stock_data[factor_name] = factor_values
 
                 all_factor_data[stock_code] = stock_data
@@ -242,14 +307,14 @@ async def run_single_backtest(request: SingleBacktestRequest):
             # K线数据
             stock_chart_data = {
                 "kline": {
-                    "dates": df.index.strftime('%Y-%m-%d').tolist(),
+                    "dates": _format_bar_index(df.index, frequency),
                     "open": df["open"].tolist() if "open" in df.columns else df["close"].tolist(),
                     "high": df["high"].tolist() if "high" in df.columns else df["close"].tolist(),
                     "low": df["low"].tolist() if "low" in df.columns else df["close"].tolist(),
                     "close": df["close"].tolist(),
                 },
                 "factor": {
-                    "dates": df.index.strftime('%Y-%m-%d').tolist(),
+                    "dates": _format_bar_index(df.index, frequency),
                     # 单因子模式：保持原有格式（向后兼容）
                     # 多因子模式：返回所有因子数据
                     "factors": [
@@ -275,9 +340,9 @@ async def run_single_backtest(request: SingleBacktestRequest):
                 exits = factor_rank > percentile_threshold
 
             # 1. 策略信号（所有满足条件的信号，不考虑持仓状态）
-            strategy_buy_dates = df.index[entries].strftime('%Y-%m-%d').tolist()
+            strategy_buy_dates = _format_bar_index(df.index[entries], frequency)
             strategy_buy_prices = df.loc[entries, "close"].tolist()
-            strategy_sell_dates = df.index[exits].strftime('%Y-%m-%d').tolist()
+            strategy_sell_dates = _format_bar_index(df.index[exits], frequency)
             strategy_sell_prices = df.loc[exits, "close"].tolist()
 
             # 2. 实际交易信号（从VectorBT交易记录中提取）
@@ -301,7 +366,9 @@ async def run_single_backtest(request: SingleBacktestRequest):
                     for entry_time, row in stock_trades_df.iterrows():
                         # entry_time 是买入日期（Timestamp）
                         if pd.notna(entry_time):
-                            buy_date = pd.Timestamp(entry_time).strftime('%Y-%m-%d')
+                            buy_date = pd.Timestamp(entry_time).strftime(
+                                "%Y-%m-%d" if frequency == DEFAULT_FREQUENCY else "%Y-%m-%d %H:%M:%S"
+                            )
                             if '入场价格' in row and pd.notna(row['入场价格']):
                                 actual_buy_dates.append(buy_date)
                                 actual_buy_prices.append(float(row['入场价格']))
@@ -313,7 +380,9 @@ async def run_single_backtest(request: SingleBacktestRequest):
                             if isinstance(exit_time, str):
                                 sell_date = exit_time  # 已经是格式化的字符串
                             else:
-                                sell_date = pd.Timestamp(exit_time).strftime('%Y-%m-%d')
+                                sell_date = pd.Timestamp(exit_time).strftime(
+                                    "%Y-%m-%d" if frequency == DEFAULT_FREQUENCY else "%Y-%m-%d %H:%M:%S"
+                                )
 
                             actual_sell_dates.append(sell_date)
 
@@ -346,7 +415,7 @@ async def run_single_backtest(request: SingleBacktestRequest):
             # 净值曲线 - 使用result中的equity_curve，或者基于信号生成模拟的
             if "equity_curve" in result_serializable and is_single_stock:
                 # 单股票模式使用回测结果的净值曲线
-                equity_dates = result["equity_curve"].index.strftime('%Y-%m-%d').tolist()
+                equity_dates = _format_bar_index(result["equity_curve"].index, frequency)
                 stock_chart_data["equity"] = {
                     "dates": equity_dates,
                     "values": result_serializable["equity_curve"]
@@ -354,7 +423,7 @@ async def run_single_backtest(request: SingleBacktestRequest):
             else:
                 # 多股票模式或没有equity_curve时，生成基于收盘价的基准曲线
                 stock_chart_data["equity"] = {
-                    "dates": df.index.strftime('%Y-%m-%d').tolist(),
+                    "dates": _format_bar_index(df.index, frequency),
                     "values": (df["close"] / df["close"].iloc[0] * request.initial_capital).tolist()
                 }
 
@@ -389,6 +458,7 @@ async def run_single_backtest(request: SingleBacktestRequest):
 async def run_strategy_comparison(request: ComparisonRequest):
     """运行策略对比"""
     try:
+        frequency = validate_frequency(request.frequency)
         from backend.services.data_service import data_service
         from backend.services.factor_service import factor_service
         import pandas as pd
@@ -397,10 +467,11 @@ async def run_strategy_comparison(request: ComparisonRequest):
         # 获取数据
         all_data = {}
         for stock_code in request.stock_codes:
-            data = data_service.get_stock_data(
+            data = data_service.get_stock_bars(
                 stock_code,
                 request.start_date,
-                request.end_date
+                request.end_date,
+                frequency=frequency,
             )
             if not data.empty:
                 all_data[stock_code] = data
@@ -439,15 +510,28 @@ async def run_strategy_comparison(request: ComparisonRequest):
             if not factor_def:
                 continue
 
-            # 计算因子值（使用因子代码）
-            factor_values = factor_service.calculator.calculate(
-                merged_data, factor_def.code
-            )
+            # 计算因子值：优先读因子值缓存，缓存为空再回退到即时计算
+            factor_df = merged_data.copy()
+            factor_df["factor_value"] = np.nan
+            for stock_code, group_index in factor_df.groupby("stock_code").groups.items():
+                cached_values = _get_cached_or_backfilled_factor_values(
+                    factor_def,
+                    stock_code,
+                    request.start_date,
+                    request.end_date,
+                    frequency,
+                )
+                if not cached_values.empty:
+                    dates = pd.to_datetime(factor_df.loc[group_index, "date"])
+                    factor_df.loc[group_index, "factor_value"] = dates.map(cached_values)
 
-            if factor_values is not None:
-                # 创建因子DataFrame
-                factor_df = merged_data.copy()
+            if factor_df["factor_value"].notna().sum() == 0:
+                factor_values = factor_service.calculator.calculate(
+                    merged_data, factor_def.code
+                )
                 factor_df["factor_value"] = factor_values
+
+            if factor_df["factor_value"].notna().sum() > 0:
 
                 # 按日期分组，选择top N股票
                 selected_returns = []
