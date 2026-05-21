@@ -56,6 +56,7 @@ Thumbs.db
 *.swp
 data/db/factorflow.db
 .pytest_cache
+.worktrees/
 todo.md
 tests/
 web_demo.md
