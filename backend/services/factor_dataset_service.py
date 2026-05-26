@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -47,6 +48,13 @@ def _extend_end_for_target(end_date: str, target: str) -> str:
     return (pd.to_datetime(end_date).to_pydatetime() + timedelta(days=extra_days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _end_bound(end_date: str) -> pd.Timestamp:
+    value = str(end_date).replace("T", " ")
+    if len(value) <= 10:
+        return pd.to_datetime(value) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    return pd.to_datetime(value)
+
+
 def _finite_or_none(value: Any) -> float | None:
     if value is None:
         return None
@@ -76,6 +84,7 @@ class FactorDatasetService:
         frequency: str | None = None,
         force: bool = False,
         warmup_days: int = 252,
+        max_seconds: float | None = None,
     ) -> dict:
         """Backfill factor values only; target labels are deliberately excluded."""
         factor = FactorRepository(db).get_by_id(factor_id)
@@ -89,9 +98,42 @@ class FactorDatasetService:
         written_count = 0
         stock_results = {}
         raw_start = _extend_start(start_date, warmup_days)
+        started_at = time.monotonic()
 
         for stock_code in stock_codes:
+            if max_seconds is not None and time.monotonic() - started_at > max_seconds:
+                raise TimeoutError(
+                    f"因子 {factor.name} 回填超过 {max_seconds:.0f} 秒，已跳过"
+                )
+
             data = self.data_service.get_stock_bars(stock_code, raw_start, end_date, frequency=frequency_key)
+            expected_index = data.loc[
+                (data.index >= pd.to_datetime(start_date))
+                & (data.index <= _end_bound(end_date))
+            ].index
+            expected_bar_times = {_bar_time_str(idx) for idx in expected_index}
+
+            if not force:
+                existing_rows = repo.get_values(
+                    factor_id,
+                    code_hash,
+                    stock_code,
+                    start_date,
+                    end_date,
+                    frequency_key,
+                )
+                existing_bar_times = {
+                    _bar_time_str(row["bar_time"])
+                    for row in existing_rows
+                    if row.get("value") is not None
+                }
+                if expected_bar_times and expected_bar_times.issubset(existing_bar_times):
+                    stock_results[stock_code] = {
+                        "written_count": 0,
+                        "cached_count": len(existing_rows),
+                    }
+                    continue
+
             values = self.factor_calculator.calculate(data, factor.code)
             if values is None:
                 stock_results[stock_code] = {"written_count": 0, "error": "因子计算失败"}
@@ -100,7 +142,7 @@ class FactorDatasetService:
             series = pd.Series(values, index=data.index)
             series = series.loc[
                 (series.index >= pd.to_datetime(start_date))
-                & (series.index <= pd.to_datetime(end_date))
+                & (series.index <= _end_bound(end_date))
             ]
             payload = [
                 {"bar_time": _bar_time_str(idx), "value": _finite_or_none(value)}
@@ -151,7 +193,7 @@ class FactorDatasetService:
             add_target_return_column(data, target_key)
             series = data[target_key].loc[
                 (data.index >= pd.to_datetime(start_date))
-                & (data.index <= pd.to_datetime(end_date))
+                & (data.index <= _end_bound(end_date))
             ]
             payload = [
                 {"bar_time": _bar_time_str(idx), "value": _finite_or_none(value)}

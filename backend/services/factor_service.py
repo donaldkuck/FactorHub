@@ -906,12 +906,8 @@ class FactorService:
             ],
         }
 
-    def get_all_factors(self, target: str = None, frequency: str = None) -> List[Dict]:
-        """获取所有因子。
-
-        target/frequency parameters are kept for API compatibility; factor
-        definitions are not bound to either dimension.
-        """
+    def get_all_factors(self) -> List[Dict]:
+        """获取所有因子。因子定义不绑定 target/frequency。"""
         db = get_db_session()
         repo = FactorRepository(db)
         factors = repo.get_all(active_only=True)
@@ -968,8 +964,6 @@ class FactorService:
     def create_factor(
         self, name: str, code: str, description: str = "",
         category: str = "自定义", formula_type: str = "expression",
-        target: str = DEFAULT_FACTOR_TARGET,
-        frequency: str = DEFAULT_FREQUENCY,
     ) -> Dict:
         """创建用户自定义因子"""
         db = get_db_session()

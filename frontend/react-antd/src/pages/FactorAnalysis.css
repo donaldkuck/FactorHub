@@ -1,0 +1,71 @@
+.factor-analysis-page {
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.factor-analysis-page .page-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.factor-analysis-page .filter-card {
+  margin-bottom: 16px;
+  border: 1px solid rgba(59, 130, 246, 0.15);
+}
+
+.factor-analysis-page .filter-label {
+  display: block;
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.factor-analysis-page .cache-status-card {
+  margin-bottom: 16px;
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  background: linear-gradient(135deg, #f0f9ff 0%, #ffffff 100%);
+}
+
+.factor-analysis-page .cache-actions {
+  margin-top: 16px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.factor-analysis-page .task-progress {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.factor-analysis-page .rankings-card {
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  min-height: 400px;
+}
+
+.factor-analysis-page .summary-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.factor-analysis-page .summary-item:last-child {
+  border-bottom: none;
+}
+
+/* Mobile adjustments */
+@media (max-width: 768px) {
+  .factor-analysis-page {
+    padding: 12px;
+  }
+
+  .factor-analysis-page .page-header h2 {
+    font-size: 18px;
+  }
+}

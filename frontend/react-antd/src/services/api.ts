@@ -278,6 +278,45 @@ export const api = {
   // 获取挖掘结果
   getMiningResults(taskId: string) {
     return request.get(`/mining/results/${taskId}`, { timeout: 300000 }) // 5分钟超时
+  },
+
+  // 因子排名查询
+  getFactorRankings(params: {
+    stock_pool_key?: string
+    target?: string
+    frequency?: string
+    start_date: string
+    end_date: string
+    sort_by?: string
+    sort_order?: string
+    page?: number
+    page_size?: number
+  }) {
+    return request.get('/analysis/factor-rankings', { params })
+  },
+
+  // 刷新因子排名缓存
+  refreshFactorRankings(data: {
+    stock_pool_key?: string
+    target?: string
+    frequency?: string
+    start_date: string
+    end_date: string
+    factor_ids?: number[]
+    force?: boolean
+    retry_statuses?: string[]
+  }) {
+    return request.post('/analysis/factor-rankings/refresh', data)
+  },
+
+  // 获取刷新任务状态
+  getRefreshTaskStatus(taskId: string) {
+    return request.get(`/analysis/factor-rankings/tasks/${taskId}`)
+  },
+
+  // 取消刷新任务
+  cancelRefreshTask(taskId: string) {
+    return request.post(`/analysis/factor-rankings/tasks/${taskId}/cancel`)
   }
 }
 

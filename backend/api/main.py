@@ -33,6 +33,7 @@ from .routers import (
     targets,
     factor_datasets,
     stock_pools,
+    factor_rankings,
 )
 
 
@@ -136,6 +137,7 @@ app.include_router(data.router, prefix="/api/data", tags=["数据管理"])
 app.include_router(targets.router, prefix="/api/targets", tags=["预测目标"])
 app.include_router(factor_datasets.router, prefix="/api/factor-datasets", tags=["因子数据集"])
 app.include_router(stock_pools.router, prefix="/api/stock-pools", tags=["股票池"])
+app.include_router(factor_rankings.router, prefix="/api/analysis", tags=["因子排名"])
 
 
 @app.get("/api")

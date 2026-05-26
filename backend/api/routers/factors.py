@@ -28,8 +28,9 @@ class FactorCreate(BaseModel):
     category: str
     description: str = ""
     formula_type: str = "expression"  # expression 或 function
-    target: str = DEFAULT_FACTOR_TARGET
-    frequency: str = DEFAULT_FREQUENCY
+    # 兼容旧客户端字段；因子定义本身不绑定 target/frequency。
+    target: Optional[str] = None
+    frequency: Optional[str] = None
 
 
 class FactorUpdate(BaseModel):
@@ -74,8 +75,6 @@ class PreselectRequest(BaseModel):
 async def get_factors(
     category: Optional[str] = None,
     source: Optional[str] = None,
-    target: Optional[str] = None,
-    frequency: Optional[str] = None,
 ):
     """
     获取因子列表
@@ -83,11 +82,12 @@ async def get_factors(
     参数:
     - category: 分类筛选（可选）
     - source: 来源筛选 preset/user（可选）
-    - target: 预测目标筛选（可选）
-    - frequency: 数据频率筛选（可选）
+
+    因子定义不绑定 target/frequency；这些维度只在因子分析、
+    回测、缓存计算时作为评估上下文使用。
     """
     try:
-        factors = factor_service.get_all_factors(target=target, frequency=frequency)
+        factors = factor_service.get_all_factors()
 
         # 筛选
         if category:
@@ -199,8 +199,6 @@ async def create_factor(request: FactorCreate):
             category=request.category,
             description=request.description,
             formula_type=request.formula_type,
-            target=request.target,
-            frequency=request.frequency,
         )
 
         return {
@@ -225,8 +223,6 @@ async def update_factor(factor_id: int, request: FactorUpdate):
             code=request.code,
             category=request.category,
             description=request.description,
-            target=request.target,
-            frequency=request.frequency,
         )
 
         return {
@@ -435,8 +431,6 @@ async def copy_factor(factor_id: int):
             category=original_factor.get("category", ""),
             description=original_factor.get("description", ""),
             formula_type=original_factor.get("formula_type", "expression"),
-            target=original_factor.get("target", DEFAULT_FACTOR_TARGET),
-            frequency=original_factor.get("frequency", DEFAULT_FREQUENCY),
         )
 
         return {

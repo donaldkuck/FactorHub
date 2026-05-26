@@ -5,6 +5,7 @@ const Home = lazy(() => import('@/pages/Home'))
 const FactorManagement = lazy(() => import('@/pages/FactorManagement'))
 const FactorDetail = lazy(() => import('@/pages/FactorDetail'))
 const FactorMining = lazy(() => import('@/pages/FactorMining'))
+const FactorAnalysis = lazy(() => import('@/pages/FactorAnalysis'))
 const PortfolioAnalysis = lazy(() => import('@/pages/PortfolioAnalysis'))
 const Backtesting = lazy(() => import('@/pages/Backtesting'))
 
@@ -37,6 +38,13 @@ export const routes = [
     label: '因子挖掘',
     icon: 'ExperimentOutlined',
     component: FactorMining
+  },
+  {
+    path: '/factor-analysis',
+    key: 'factor-analysis',
+    label: '因子分析',
+    icon: 'BarChartOutlined',
+    component: FactorAnalysis
   },
   {
     path: '/portfolio-analysis',

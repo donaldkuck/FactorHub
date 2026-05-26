@@ -7,6 +7,7 @@ import {
   ExperimentOutlined,
   PieChartOutlined,
   SyncOutlined,
+  BarChartOutlined,
   MenuOutlined
 } from '@ant-design/icons'
 import routes from './utils/router'
@@ -246,7 +247,8 @@ function createIcon(iconName: string) {
     FileTextOutlined,
     ExperimentOutlined,
     PieChartOutlined,
-    SyncOutlined
+    SyncOutlined,
+    BarChartOutlined
   }
   return icons[iconName] || DashboardOutlined
 }
