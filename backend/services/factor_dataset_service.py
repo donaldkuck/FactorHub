@@ -101,63 +101,77 @@ class FactorDatasetService:
         started_at = time.monotonic()
 
         for stock_code in stock_codes:
-            if max_seconds is not None and time.monotonic() - started_at > max_seconds:
-                raise TimeoutError(
-                    f"因子 {factor.name} 回填超过 {max_seconds:.0f} 秒，已跳过"
+            try:
+                if max_seconds is not None and time.monotonic() - started_at > max_seconds:
+                    raise TimeoutError(
+                        f"因子 {factor.name} 回填超过 {max_seconds:.0f} 秒，已跳过"
+                    )
+
+                data = self.data_service.get_stock_bars(
+                    stock_code,
+                    raw_start,
+                    end_date,
+                    frequency=frequency_key,
+                    use_cache=not force,
+                    allow_online=False,
                 )
+                self._ensure_local_coverage(data, stock_code, start_date, end_date, frequency_key)
+                expected_index = data.loc[
+                    (data.index >= pd.to_datetime(start_date))
+                    & (data.index <= _end_bound(end_date))
+                ].index
+                expected_bar_times = {_bar_time_str(idx) for idx in expected_index}
 
-            data = self.data_service.get_stock_bars(stock_code, raw_start, end_date, frequency=frequency_key)
-            expected_index = data.loc[
-                (data.index >= pd.to_datetime(start_date))
-                & (data.index <= _end_bound(end_date))
-            ].index
-            expected_bar_times = {_bar_time_str(idx) for idx in expected_index}
+                if not force:
+                    existing_rows = repo.get_values(
+                        factor_id,
+                        code_hash,
+                        stock_code,
+                        start_date,
+                        end_date,
+                        frequency_key,
+                    )
+                    existing_bar_times = {
+                        _bar_time_str(row["bar_time"])
+                        for row in existing_rows
+                        if row.get("value") is not None
+                    }
+                    if expected_bar_times and expected_bar_times.issubset(existing_bar_times):
+                        stock_results[stock_code] = {
+                            "written_count": 0,
+                            "cached_count": len(existing_rows),
+                        }
+                        continue
 
-            if not force:
-                existing_rows = repo.get_values(
+                values = self.factor_calculator.calculate(data, factor.code)
+                if values is None:
+                    stock_results[stock_code] = {"written_count": 0, "error": "因子计算失败"}
+                    continue
+
+                series = pd.Series(values, index=data.index)
+                series = series.loc[
+                    (series.index >= pd.to_datetime(start_date))
+                    & (series.index <= _end_bound(end_date))
+                ]
+                payload = [
+                    {"bar_time": _bar_time_str(idx), "value": _finite_or_none(value)}
+                    for idx, value in series.dropna().items()
+                ]
+                written = repo.upsert_values(
                     factor_id,
                     code_hash,
                     stock_code,
-                    start_date,
-                    end_date,
-                    frequency_key,
+                    payload,
+                    frequency=frequency_key,
+                    force=force,
                 )
-                existing_bar_times = {
-                    _bar_time_str(row["bar_time"])
-                    for row in existing_rows
-                    if row.get("value") is not None
-                }
-                if expected_bar_times and expected_bar_times.issubset(existing_bar_times):
-                    stock_results[stock_code] = {
-                        "written_count": 0,
-                        "cached_count": len(existing_rows),
-                    }
-                    continue
-
-            values = self.factor_calculator.calculate(data, factor.code)
-            if values is None:
-                stock_results[stock_code] = {"written_count": 0, "error": "因子计算失败"}
+                written_count += written
+                stock_results[stock_code] = {"written_count": written}
+            except TimeoutError:
+                raise
+            except Exception as e:
+                stock_results[stock_code] = {"written_count": 0, "error": str(e)}
                 continue
-
-            series = pd.Series(values, index=data.index)
-            series = series.loc[
-                (series.index >= pd.to_datetime(start_date))
-                & (series.index <= _end_bound(end_date))
-            ]
-            payload = [
-                {"bar_time": _bar_time_str(idx), "value": _finite_or_none(value)}
-                for idx, value in series.dropna().items()
-            ]
-            written = repo.upsert_values(
-                factor_id,
-                code_hash,
-                stock_code,
-                payload,
-                frequency=frequency_key,
-                force=force,
-            )
-            written_count += written
-            stock_results[stock_code] = {"written_count": written}
 
         return {
             "factor_id": factor.id,
@@ -189,19 +203,31 @@ class FactorDatasetService:
         raw_end = _extend_end_for_target(end_date, target_key)
 
         for stock_code in stock_codes:
-            data = self.data_service.get_stock_bars(stock_code, start_date, raw_end, frequency=frequency_key)
-            add_target_return_column(data, target_key)
-            series = data[target_key].loc[
-                (data.index >= pd.to_datetime(start_date))
-                & (data.index <= _end_bound(end_date))
-            ]
-            payload = [
-                {"bar_time": _bar_time_str(idx), "value": _finite_or_none(value)}
-                for idx, value in series.dropna().items()
-            ]
-            written = repo.upsert_values(target_key, stock_code, payload, frequency=frequency_key, force=force)
-            written_count += written
-            stock_results[stock_code] = {"written_count": written}
+            try:
+                data = self.data_service.get_stock_bars(
+                    stock_code,
+                    start_date,
+                    raw_end,
+                    frequency=frequency_key,
+                    use_cache=not force,
+                    allow_online=False,
+                )
+                self._ensure_local_coverage(data, stock_code, start_date, end_date, frequency_key)
+                add_target_return_column(data, target_key)
+                series = data[target_key].loc[
+                    (data.index >= pd.to_datetime(start_date))
+                    & (data.index <= _end_bound(end_date))
+                ]
+                payload = [
+                    {"bar_time": _bar_time_str(idx), "value": _finite_or_none(value)}
+                    for idx, value in series.dropna().items()
+                ]
+                written = repo.upsert_values(target_key, stock_code, payload, frequency=frequency_key, force=force)
+                written_count += written
+                stock_results[stock_code] = {"written_count": written}
+            except Exception as e:
+                stock_results[stock_code] = {"written_count": 0, "error": str(e)}
+                continue
 
         return {
             "target": target_key,
@@ -211,6 +237,29 @@ class FactorDatasetService:
             "written_count": written_count,
             "stocks": stock_results,
         }
+
+    def _ensure_local_coverage(
+        self,
+        data: pd.DataFrame,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        frequency: str,
+    ) -> None:
+        """Fail fast when local raw bars do not cover the requested window."""
+        if data is None or data.empty:
+            raise ValueError(f"本地 raw_bar 缺少 {stock_code} {frequency} K 线")
+        requested_start = pd.to_datetime(start_date)
+        requested_end = _end_bound(end_date)
+        actual_start = pd.to_datetime(data.index.min())
+        actual_end = pd.to_datetime(data.index.max())
+        if actual_start > requested_start or actual_end < requested_end:
+            raise ValueError(
+                f"本地 raw_bar 覆盖不足: {stock_code} {frequency} "
+                f"需要 {requested_start:%Y-%m-%d %H:%M:%S} - {requested_end:%Y-%m-%d %H:%M:%S}，"
+                f"实际 {actual_start:%Y-%m-%d %H:%M:%S} - {actual_end:%Y-%m-%d %H:%M:%S}。"
+                "请先在数据导入页补齐 K 线"
+            )
 
     def ensure_dataset(
         self,

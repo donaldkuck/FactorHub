@@ -25,6 +25,7 @@ class FactorPerformanceBarCacheModel(Base):
             "stock_pool_snapshot_hash",
             "target",
             "frequency",
+            "adjust",
             "bar_time",
             "metric_version",
             name="uq_factor_perf_bar",
@@ -39,6 +40,7 @@ class FactorPerformanceBarCacheModel(Base):
     stock_pool_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     target: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     frequency: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    adjust: Mapped[str] = mapped_column(String(10), nullable=False, default="hfq", index=True)
     bar_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     metric_version: Mapped[int] = mapped_column(Integer, nullable=False, default=METRIC_VERSION)
     ic_value: Mapped[float] = mapped_column(Float, nullable=True)
@@ -60,6 +62,7 @@ class FactorPerformanceBarCacheModel(Base):
             "stock_pool_snapshot_hash": self.stock_pool_snapshot_hash,
             "target": self.target,
             "frequency": self.frequency,
+            "adjust": self.adjust,
             "bar_time": self.bar_time.isoformat() if self.bar_time else None,
             "metric_version": self.metric_version,
             "ic_value": self.ic_value,

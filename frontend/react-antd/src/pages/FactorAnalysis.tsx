@@ -60,6 +60,12 @@ interface CacheSummary {
   insufficient_data: number
   pending: number
   total_bars: number
+  distinct_bar_count?: number
+  first_bar_time?: string | null
+  last_bar_time?: string | null
+  requested_span_days?: number | null
+  actual_span_days?: number | null
+  time_coverage?: number | null
 }
 
 interface RankingsData {
@@ -228,9 +234,26 @@ export default function FactorAnalysis() {
         pollTaskStatus(res.data.task_id)
       }
     } catch (e: any) {
-      message.error(e.message || '刷新启动失败')
+      showRefreshError(e.message || '刷新启动失败')
       setRefreshing(false)
     }
+  }
+
+  const isLocalBarError = (text?: string | null) => {
+    return Boolean(text && (text.includes('本地 raw_bar 缺少') || text.includes('本地 raw_bar 覆盖不足')))
+  }
+
+  const showRefreshError = (text: string) => {
+    if (isLocalBarError(text)) {
+      Modal.warning({
+        title: '本地 K 线数据不足',
+        content: text,
+        okText: '去数据导入',
+        onOk: () => navigate('/data-import'),
+      })
+      return
+    }
+    message.error(text)
   }
 
   const cancelRefresh = async () => {
@@ -285,7 +308,7 @@ export default function FactorAnalysis() {
               message.warning('刷新任务已取消')
               queryRankings()
             } else {
-              message.error(`刷新失败: ${ts.error || '未知错误'}`)
+              showRefreshError(ts.error || '刷新失败')
             }
           }
         }
@@ -380,6 +403,13 @@ export default function FactorAnalysis() {
   ]
 
   const cacheSummary = rankings?.cache_summary
+  const timeCoverage = cacheSummary?.time_coverage ?? null
+  const showTimeCoverageWarning = Boolean(
+    cacheSummary
+    && cacheSummary.total_bars > 0
+    && timeCoverage != null
+    && timeCoverage < 0.5
+  )
   const processedTaskItems = taskStatus
     ? taskStatus.cache_hits + taskStatus.computed_items + taskStatus.failed_items + (taskStatus.skipped_items || 0)
     : 0
@@ -569,7 +599,10 @@ export default function FactorAnalysis() {
                   </Tag>
                 )}
                 {taskStatus.status === 'failed' && (
-                  <Tag color="error">失败</Tag>
+                  <Tag color="error" title={taskStatus.error || undefined}>失败</Tag>
+                )}
+                {taskStatus.status === 'stalled' && (
+                  <Tag color="warning" title={taskStatus.error || undefined}>已停滞</Tag>
                 )}
                 {taskStatus.status === 'cancelled' && (
                   <Tag color="default">已取消</Tag>
@@ -578,6 +611,22 @@ export default function FactorAnalysis() {
             )}
           </div>
         </Card>
+      )}
+
+      {showTimeCoverageWarning && cacheSummary && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="当前排名只覆盖了所选时间窗口的一小段数据"
+          description={
+            `实际参与排名的 Bar 时间范围：${cacheSummary.first_bar_time?.slice(0, 16) || '-'} 至 ${cacheSummary.last_bar_time?.slice(0, 16) || '-'}，` +
+            `去重 Bar ${cacheSummary.distinct_bar_count || 0} 个，` +
+            `时间跨度约 ${cacheSummary.actual_span_days ?? 0} / ${cacheSummary.requested_span_days ?? 0} 天。` +
+            `${frequency === '60m' ? '60分钟补齐只能使用当前行情源返回的分钟数据，不能补出行情源未提供的更早历史分钟 Bar。' : ''}` +
+            '这种情况下 IC/IR 容易偏高，不建议直接按排名判断因子有效。'
+          }
+        />
       )}
 
       {/* Error */}

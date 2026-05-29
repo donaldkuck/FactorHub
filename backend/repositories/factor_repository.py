@@ -22,9 +22,12 @@ from backend.models.factor_performance import (
     FactorPerformanceBarCacheModel,
     METRIC_VERSION,
 )
+from backend.services.duckdb_bar_store import duckdb_bar_store
 import hashlib
 import json
 import numpy as np
+
+DEFAULT_ADJUST = "hfq"
 
 
 def _to_datetime(value) -> datetime:
@@ -216,11 +219,23 @@ class FactorValueCacheRepository:
         stock_code: str,
         values: list[dict],
         frequency: str = DEFAULT_FREQUENCY,
+        adjust: str = DEFAULT_ADJUST,
         force: bool = False,
     ) -> int:
         """批量写入因子值。默认保留已有缓存，force=True 时覆盖。"""
         from sqlalchemy.exc import IntegrityError
         frequency_key = validate_frequency(frequency)
+        if duckdb_bar_store.is_available():
+            return duckdb_bar_store.upsert_factor_values(
+                factor_id=factor_id,
+                factor_code_hash=factor_code_hash,
+                stock_code=stock_code,
+                values=values,
+                frequency=frequency_key,
+                adjust=adjust,
+                force=force,
+            )
+
         written = 0
         for item in values:
             bar_time = _to_datetime(item.get("bar_time", item.get("trade_date")))
@@ -230,6 +245,7 @@ class FactorValueCacheRepository:
                 .where(FactorValueCacheModel.factor_code_hash == factor_code_hash)
                 .where(FactorValueCacheModel.stock_code == stock_code)
                 .where(FactorValueCacheModel.frequency == frequency_key)
+                .where(FactorValueCacheModel.adjust == adjust)
                 .where(FactorValueCacheModel.bar_time == bar_time)
             )
             if existing:
@@ -245,6 +261,7 @@ class FactorValueCacheRepository:
                             factor_code_hash=factor_code_hash,
                             stock_code=stock_code,
                             frequency=frequency_key,
+                            adjust=adjust,
                             bar_time=bar_time,
                             value=item.get("value"),
                         )
@@ -264,15 +281,30 @@ class FactorValueCacheRepository:
         start_date: str,
         end_date: str,
         frequency: str = DEFAULT_FREQUENCY,
+        adjust: str = DEFAULT_ADJUST,
     ) -> list[dict]:
         """按因子定义、股票和日期范围读取因子值缓存"""
         frequency_key = validate_frequency(frequency)
+        if duckdb_bar_store.is_available():
+            duckdb_rows = duckdb_bar_store.get_factor_values(
+                factor_id=factor_id,
+                factor_code_hash=factor_code_hash,
+                stock_code=stock_code,
+                start_time=_to_datetime(start_date),
+                end_time=_to_datetime_end(end_date),
+                frequency=frequency_key,
+                adjust=adjust,
+            )
+            if duckdb_rows:
+                return duckdb_rows
+
         rows = self.db.scalars(
             select(FactorValueCacheModel)
             .where(FactorValueCacheModel.factor_id == factor_id)
             .where(FactorValueCacheModel.factor_code_hash == factor_code_hash)
             .where(FactorValueCacheModel.stock_code == stock_code)
             .where(FactorValueCacheModel.frequency == frequency_key)
+            .where(FactorValueCacheModel.adjust == adjust)
             .where(FactorValueCacheModel.bar_time >= _to_datetime(start_date))
             .where(FactorValueCacheModel.bar_time <= _to_datetime_end(end_date))
             .order_by(FactorValueCacheModel.bar_time)
@@ -281,12 +313,18 @@ class FactorValueCacheRepository:
 
     def delete_for_factor(self, factor_id: int, factor_code_hash: Optional[str] = None) -> int:
         """删除某个因子的缓存，可限定到某个代码 hash"""
+        duckdb_deleted = 0
+        if duckdb_bar_store.is_available():
+            duckdb_deleted = duckdb_bar_store.delete_factor_values(
+                factor_id=factor_id,
+                factor_code_hash=factor_code_hash,
+            )
         stmt = delete(FactorValueCacheModel).where(FactorValueCacheModel.factor_id == factor_id)
         if factor_code_hash:
             stmt = stmt.where(FactorValueCacheModel.factor_code_hash == factor_code_hash)
         result = self.db.execute(stmt)
         self.db.commit()
-        return result.rowcount
+        return (result.rowcount or 0) + duckdb_deleted
 
 
 class TargetReturnCacheRepository:
@@ -301,6 +339,7 @@ class TargetReturnCacheRepository:
         stock_code: str,
         values: list[dict],
         frequency: str = DEFAULT_FREQUENCY,
+        adjust: str = DEFAULT_ADJUST,
         force: bool = False,
     ) -> int:
         """批量写入 target 收益。默认保留已有缓存，force=True 时覆盖。"""
@@ -314,6 +353,7 @@ class TargetReturnCacheRepository:
                 .where(TargetReturnCacheModel.target == target)
                 .where(TargetReturnCacheModel.stock_code == stock_code)
                 .where(TargetReturnCacheModel.frequency == frequency_key)
+                .where(TargetReturnCacheModel.adjust == adjust)
                 .where(TargetReturnCacheModel.bar_time == bar_time)
             )
             if existing:
@@ -328,6 +368,7 @@ class TargetReturnCacheRepository:
                             target=target,
                             stock_code=stock_code,
                             frequency=frequency_key,
+                            adjust=adjust,
                             bar_time=bar_time,
                             value=item.get("value"),
                         )
@@ -346,6 +387,7 @@ class TargetReturnCacheRepository:
         start_date: str,
         end_date: str,
         frequency: str = DEFAULT_FREQUENCY,
+        adjust: str = DEFAULT_ADJUST,
     ) -> list[dict]:
         """按目标、股票和日期范围读取 target 收益缓存"""
         frequency_key = validate_frequency(frequency)
@@ -354,6 +396,7 @@ class TargetReturnCacheRepository:
             .where(TargetReturnCacheModel.target == target)
             .where(TargetReturnCacheModel.stock_code == stock_code)
             .where(TargetReturnCacheModel.frequency == frequency_key)
+            .where(TargetReturnCacheModel.adjust == adjust)
             .where(TargetReturnCacheModel.bar_time >= _to_datetime(start_date))
             .where(TargetReturnCacheModel.bar_time <= _to_datetime_end(end_date))
             .order_by(TargetReturnCacheModel.bar_time)
@@ -397,6 +440,7 @@ class FactorPerformanceCacheRepository:
         coverage: float,
         status: str = "completed",
         error_message: Optional[str] = None,
+        adjust: str = DEFAULT_ADJUST,
     ) -> FactorPerformanceBarCacheModel:
         """Upsert a single bar's IC record."""
         existing = self.db.scalar(
@@ -407,6 +451,7 @@ class FactorPerformanceCacheRepository:
             .where(FactorPerformanceBarCacheModel.stock_pool_snapshot_hash == stock_pool_snapshot_hash)
             .where(FactorPerformanceBarCacheModel.target == target)
             .where(FactorPerformanceBarCacheModel.frequency == frequency)
+            .where(FactorPerformanceBarCacheModel.adjust == adjust)
             .where(FactorPerformanceBarCacheModel.bar_time == bar_time)
             .where(FactorPerformanceBarCacheModel.metric_version == METRIC_VERSION)
         )
@@ -428,6 +473,7 @@ class FactorPerformanceCacheRepository:
             stock_pool_snapshot_hash=stock_pool_snapshot_hash,
             target=target,
             frequency=frequency,
+            adjust=adjust,
             bar_time=bar_time,
             metric_version=METRIC_VERSION,
             ic_value=ic_value,
@@ -447,6 +493,7 @@ class FactorPerformanceCacheRepository:
         stock_pool_snapshot_hash: str,
         target: str,
         frequency: str,
+        adjust: str = DEFAULT_ADJUST,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
     ) -> list[dict]:
@@ -458,6 +505,7 @@ class FactorPerformanceCacheRepository:
             .where(FactorPerformanceBarCacheModel.stock_pool_snapshot_hash == stock_pool_snapshot_hash)
             .where(FactorPerformanceBarCacheModel.target == target)
             .where(FactorPerformanceBarCacheModel.frequency == frequency)
+            .where(FactorPerformanceBarCacheModel.adjust == adjust)
             .where(FactorPerformanceBarCacheModel.metric_version == METRIC_VERSION)
         )
         if start_date:
@@ -473,6 +521,7 @@ class FactorPerformanceCacheRepository:
         stock_pool_snapshot_hash: str,
         target: str,
         frequency: str,
+        adjust: str = DEFAULT_ADJUST,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
     ) -> list[dict]:
@@ -488,6 +537,7 @@ class FactorPerformanceCacheRepository:
             .where(FactorPerformanceBarCacheModel.stock_pool_snapshot_hash == stock_pool_snapshot_hash)
             .where(FactorPerformanceBarCacheModel.target == target)
             .where(FactorPerformanceBarCacheModel.frequency == frequency)
+            .where(FactorPerformanceBarCacheModel.adjust == adjust)
             .where(FactorPerformanceBarCacheModel.metric_version == METRIC_VERSION)
         )
         if start_date:
@@ -582,10 +632,14 @@ class FactorPerformanceCacheRepository:
         stock_pool_snapshot_hash: str,
         target: str,
         frequency: str,
+        adjust: str = DEFAULT_ADJUST,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
     ) -> dict:
         """Summary of cache coverage across all factors."""
+        requested_start = _to_datetime(start_date) if start_date else None
+        requested_end = _to_datetime_end(end_date) if end_date else None
+
         query = (
             select(
                 FactorPerformanceBarCacheModel.status,
@@ -596,6 +650,7 @@ class FactorPerformanceCacheRepository:
             .where(FactorPerformanceBarCacheModel.stock_pool_snapshot_hash == stock_pool_snapshot_hash)
             .where(FactorPerformanceBarCacheModel.target == target)
             .where(FactorPerformanceBarCacheModel.frequency == frequency)
+            .where(FactorPerformanceBarCacheModel.adjust == adjust)
             .where(FactorPerformanceBarCacheModel.metric_version == METRIC_VERSION)
         )
         if start_date:
@@ -608,6 +663,48 @@ class FactorPerformanceCacheRepository:
         for row in rows:
             summary[row.status] = row.count
             summary["total_bars"] += row.count
+
+        coverage_query = (
+            select(
+                func.count(func.distinct(FactorPerformanceBarCacheModel.bar_time)).label("distinct_bar_count"),
+                func.min(FactorPerformanceBarCacheModel.bar_time).label("first_bar_time"),
+                func.max(FactorPerformanceBarCacheModel.bar_time).label("last_bar_time"),
+            )
+            .where(FactorPerformanceBarCacheModel.stock_pool_key == stock_pool_key)
+            .where(FactorPerformanceBarCacheModel.stock_pool_snapshot_hash == stock_pool_snapshot_hash)
+            .where(FactorPerformanceBarCacheModel.target == target)
+            .where(FactorPerformanceBarCacheModel.frequency == frequency)
+            .where(FactorPerformanceBarCacheModel.adjust == adjust)
+            .where(FactorPerformanceBarCacheModel.metric_version == METRIC_VERSION)
+        )
+        if start_date:
+            coverage_query = coverage_query.where(FactorPerformanceBarCacheModel.bar_time >= requested_start)
+        if end_date:
+            coverage_query = coverage_query.where(FactorPerformanceBarCacheModel.bar_time <= requested_end)
+        coverage = self.db.execute(coverage_query).one()
+
+        first_bar_time = coverage.first_bar_time
+        last_bar_time = coverage.last_bar_time
+        requested_span_days = None
+        actual_span_days = None
+        time_coverage = None
+        if requested_start and requested_end:
+            requested_span_days = max((requested_end - requested_start).total_seconds() / 86400, 0)
+        if first_bar_time and last_bar_time:
+            actual_span_days = max((last_bar_time - first_bar_time).total_seconds() / 86400, 0)
+        if requested_span_days and actual_span_days is not None:
+            time_coverage = min(actual_span_days / requested_span_days, 1.0)
+
+        summary.update(
+            {
+                "distinct_bar_count": coverage.distinct_bar_count or 0,
+                "first_bar_time": first_bar_time.isoformat() if first_bar_time else None,
+                "last_bar_time": last_bar_time.isoformat() if last_bar_time else None,
+                "requested_span_days": round(requested_span_days, 2) if requested_span_days is not None else None,
+                "actual_span_days": round(actual_span_days, 2) if actual_span_days is not None else None,
+                "time_coverage": round(time_coverage, 4) if time_coverage is not None else None,
+            }
+        )
         return summary
 
     def get_problem_factor_summary(
@@ -616,6 +713,7 @@ class FactorPerformanceCacheRepository:
         stock_pool_snapshot_hash: str,
         target: str,
         frequency: str,
+        adjust: str = DEFAULT_ADJUST,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         limit: int = 20,
@@ -633,6 +731,7 @@ class FactorPerformanceCacheRepository:
             .where(FactorPerformanceBarCacheModel.stock_pool_snapshot_hash == stock_pool_snapshot_hash)
             .where(FactorPerformanceBarCacheModel.target == target)
             .where(FactorPerformanceBarCacheModel.frequency == frequency)
+            .where(FactorPerformanceBarCacheModel.adjust == adjust)
             .where(FactorPerformanceBarCacheModel.metric_version == METRIC_VERSION)
             .where(FactorPerformanceBarCacheModel.status.in_(["failed", "insufficient_data"]))
         )

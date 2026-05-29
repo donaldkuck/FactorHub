@@ -6,6 +6,8 @@ const FactorManagement = lazy(() => import('@/pages/FactorManagement'))
 const FactorDetail = lazy(() => import('@/pages/FactorDetail'))
 const FactorMining = lazy(() => import('@/pages/FactorMining'))
 const FactorAnalysis = lazy(() => import('@/pages/FactorAnalysis'))
+const DataImport = lazy(() => import('@/pages/DataImport'))
+const DataCoverage = lazy(() => import('@/pages/DataCoverage'))
 const PortfolioAnalysis = lazy(() => import('@/pages/PortfolioAnalysis'))
 const Backtesting = lazy(() => import('@/pages/Backtesting'))
 
@@ -45,6 +47,20 @@ export const routes = [
     label: '因子分析',
     icon: 'BarChartOutlined',
     component: FactorAnalysis
+  },
+  {
+    path: '/data-import',
+    key: 'data-import',
+    label: '数据导入',
+    icon: 'DatabaseOutlined',
+    component: DataImport
+  },
+  {
+    path: '/data-coverage',
+    key: 'data-coverage',
+    label: '数据查看',
+    icon: 'DatabaseOutlined',
+    component: DataCoverage
   },
   {
     path: '/portfolio-analysis',

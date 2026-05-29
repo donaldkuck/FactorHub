@@ -180,6 +180,7 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
                 request.start_date,
                 request.end_date,
                 frequency=frequency,
+                allow_online=False,
             )
             if stock_data is None or len(stock_data) == 0:
                 logger.warning(f"No valid data for stock {stock_code}")

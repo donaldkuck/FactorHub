@@ -180,9 +180,13 @@ async def global_exception_handler(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "backend.api.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    reload_enabled = os.getenv("FACTORFLOW_API_RELOAD", "0").lower() in {"1", "true", "yes"}
+    uvicorn_kwargs = {
+        "app": "backend.api.main:app",
+        "host": "0.0.0.0",
+        "port": 8000,
+        "reload": reload_enabled,
+    }
+    if reload_enabled:
+        uvicorn_kwargs["reload_dirs"] = ["backend"]
+    uvicorn.run(**uvicorn_kwargs)

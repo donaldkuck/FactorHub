@@ -7,6 +7,7 @@ import webbrowser
 import time
 import os
 import signal
+import threading
 from pathlib import Path
 
 def get_pnpm_cmd():
@@ -29,6 +30,14 @@ def check_pnpm_installed():
         return False, None
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False, None
+
+def stream_process_output(name, process):
+    """Drain child stdout so server processes cannot block on a full pipe."""
+    if not process.stdout:
+        return
+
+    for line in process.stdout:
+        print(f"[{name}] {line}", end="")
 
 def main():
     print("=" * 60)
@@ -105,6 +114,11 @@ def main():
             bufsize=1
         )
         processes.append(("Backend API", api_process))
+        threading.Thread(
+            target=stream_process_output,
+            args=("Backend API", api_process),
+            daemon=True,
+        ).start()
 
         # 等待 API 服务启动
         print("  等待 API 服务启动...")
@@ -131,6 +145,11 @@ def main():
             bufsize=1
         )
         processes.append(("Frontend Dev Server", frontend_process))
+        threading.Thread(
+            target=stream_process_output,
+            args=("Frontend", frontend_process),
+            daemon=True,
+        ).start()
 
         # 等待前端服务启动
         print("  等待前端服务启动...")
@@ -160,7 +179,8 @@ def main():
 
         print("\n💡 提示:")
         print("  - 前端支持热更新，修改代码会自动刷新")
-        print("  - API 支持自动重载，修改代码会自动重启")
+        print("  - API 默认关闭自动重载，避免长计算写缓存时拖慢服务")
+        print("  - 如需 API 自动重载，可设置 FACTORFLOW_API_RELOAD=1 后再启动")
         print("  - 按 Ctrl+C 停止所有服务")
         print("-" * 60)
 

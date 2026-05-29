@@ -53,6 +53,7 @@ class FactorValueCacheModel(Base):
             "factor_code_hash",
             "stock_code",
             "frequency",
+            "adjust",
             "bar_time",
             name="uq_factor_value_cache_key",
         ),
@@ -63,6 +64,7 @@ class FactorValueCacheModel(Base):
     factor_code_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     stock_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     frequency: Mapped[str] = mapped_column(String(20), nullable=False, default=DEFAULT_FREQUENCY, index=True)
+    adjust: Mapped[str] = mapped_column(String(10), nullable=False, default="hfq", index=True)
     bar_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     value: Mapped[float] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
@@ -76,6 +78,7 @@ class FactorValueCacheModel(Base):
             "factor_code_hash": self.factor_code_hash,
             "stock_code": self.stock_code,
             "frequency": self.frequency,
+            "adjust": self.adjust,
             "bar_time": self.bar_time.isoformat() if self.bar_time else None,
             "value": self.value,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -92,6 +95,7 @@ class TargetReturnCacheModel(Base):
             "target",
             "stock_code",
             "frequency",
+            "adjust",
             "bar_time",
             name="uq_target_return_cache_key",
         ),
@@ -101,6 +105,7 @@ class TargetReturnCacheModel(Base):
     target: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     stock_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     frequency: Mapped[str] = mapped_column(String(20), nullable=False, default=DEFAULT_FREQUENCY, index=True)
+    adjust: Mapped[str] = mapped_column(String(10), nullable=False, default="hfq", index=True)
     bar_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     value: Mapped[float] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
@@ -113,8 +118,55 @@ class TargetReturnCacheModel(Base):
             "target": self.target,
             "stock_code": self.stock_code,
             "frequency": self.frequency,
+            "adjust": self.adjust,
             "bar_time": self.bar_time.isoformat() if self.bar_time else None,
             "value": self.value,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class StockBarCacheModel(Base):
+    """Imported raw OHLCV bars used before falling back to online data."""
+
+    __tablename__ = "stock_bar_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_code",
+            "frequency",
+            "bar_time",
+            "source",
+            name="uq_stock_bar_cache_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    frequency: Mapped[str] = mapped_column(String(20), nullable=False, default=DEFAULT_FREQUENCY, index=True)
+    bar_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    open: Mapped[float] = mapped_column(Float, nullable=True)
+    high: Mapped[float] = mapped_column(Float, nullable=True)
+    low: Mapped[float] = mapped_column(Float, nullable=True)
+    close: Mapped[float] = mapped_column(Float, nullable=True)
+    volume: Mapped[float] = mapped_column(Float, nullable=True)
+    amount: Mapped[float] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(50), nullable=False, default="import", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "stock_code": self.stock_code,
+            "frequency": self.frequency,
+            "bar_time": self.bar_time.isoformat() if self.bar_time else None,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "volume": self.volume,
+            "amount": self.amount,
+            "source": self.source,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -271,6 +271,15 @@ class FactorRankingService:
                     force=force,
                     max_seconds=max_factor_seconds,
                 )
+            except TimeoutError as e:
+                logger.warning(f"Factor {factor.name} backfill timed out: {e}")
+                stopped_reason = (
+                    f"因子 {factor.name} 回填超过 {max_factor_seconds:.0f} 秒，"
+                    "本轮已暂停，未覆盖已有排名缓存"
+                )
+                skipped_items += len(target_bar_times)
+                report(factor.name)
+                break
             except Exception as e:
                 logger.warning(f"Factor {factor.name} backfill failed: {e}")
                 if target_bar_times:

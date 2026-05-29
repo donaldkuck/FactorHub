@@ -111,6 +111,7 @@ async def calculate_factor(request: CalculateRequest):
                     request.start_date,
                     request.end_date,
                     frequency=request.frequency,
+                    allow_online=False,
                 )
 
                 if data is None or len(data) == 0:

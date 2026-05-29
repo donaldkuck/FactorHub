@@ -157,6 +157,7 @@ async def run_single_backtest(request: SingleBacktestRequest):
                 request.start_date,
                 request.end_date,
                 frequency=frequency,
+                allow_online=False,
             )
 
             if stock_data is not None and len(stock_data) > 0:
@@ -472,6 +473,7 @@ async def run_strategy_comparison(request: ComparisonRequest):
                 request.start_date,
                 request.end_date,
                 frequency=frequency,
+                allow_online=False,
             )
             if not data.empty:
                 all_data[stock_code] = data

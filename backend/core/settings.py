@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     DB_DIR: Path = DATA_DIR / "db"
     CONFIG_DIR: Path = BASE_DIR / "config"
     REPORTS_DIR: Path = DATA_DIR / "reports"
+    WAREHOUSE_DIR: Path = DATA_DIR / "warehouse"
+    DUCKDB_PATH: Path = WAREHOUSE_DIR / "factorflow.duckdb"
 
     # 数据库配置
     DATABASE_URL: str = f"sqlite:///{DB_DIR}/factorflow.db"
@@ -31,6 +33,8 @@ class Settings(BaseSettings):
     # akshare 配置
     AKSHARE_CACHE_ENABLED: bool = True
     AKSHARE_CACHE_DIR: Path = CACHE_DIR / "akshare"
+    AKSHARE_REQUEST_TIMEOUT: int = 30  # 单次行情接口调用超时（秒）
+    AKSHARE_MINUTE_BATCH_DAYS: int = 180  # 分钟线底层接口分批拉取窗口（天）
 
     # 缓存配置
     CACHE_DEFAULT_TTL: int = 7 * 24 * 60 * 60  # 默认TTL: 7天（秒）
@@ -57,6 +61,7 @@ class Settings(BaseSettings):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.DB_DIR.mkdir(parents=True, exist_ok=True)
+        self.WAREHOUSE_DIR.mkdir(parents=True, exist_ok=True)
         self.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         self.AKSHARE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 

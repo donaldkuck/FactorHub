@@ -36,7 +36,7 @@ request.interceptors.response.use(
 
       switch (status) {
         case 400:
-          message = data.message || '请求参数错误'
+          message = data.detail || data.message || '请求参数错误'
           break
         case 401:
           message = '未授权，请重新登录'
@@ -48,10 +48,10 @@ request.interceptors.response.use(
           message = '请求的资源不存在'
           break
         case 500:
-          message = data.message || '服务器错误'
+          message = data.detail || data.message || '服务器错误'
           break
         default:
-          message = data.message || `请求失败 (${status})`
+          message = data.detail || data.message || `请求失败 (${status})`
       }
     } else if (error.request) {
       message = '网络错误，请检查网络连接'
@@ -122,6 +122,91 @@ export const api = {
     return request.get(`/data/stock/${code}`, {
       params: { start_date: startDate, end_date: endDate, frequency }
     })
+  },
+
+  // 导入本地 K 线文件
+  importBars(data: {
+    file_path: string
+    frequency?: string
+    adjust?: string
+    source?: string
+    force?: boolean
+    invalidate_derived?: boolean
+  }) {
+    return request.post('/data/bars/import', data, { timeout: 300000 })
+  },
+
+  // 获取已导入 K 线覆盖范围
+  getImportedBarStats(params?: { frequency?: string }) {
+    return request.get('/data/bars/imported/stats', { params })
+  },
+
+  getImportedBarCoverage(params?: {
+    frequency?: string
+    source?: string
+    stock_code?: string
+    adjust?: string
+    cache_type?: string
+    page?: number
+    page_size?: number
+  }) {
+    return request.get('/data/bars/imported/coverage', { params })
+  },
+
+  getImportedBarSample(params: {
+    stock_code: string
+    frequency: string
+    source?: string
+    adjust?: string
+    limit?: number
+  }) {
+    return request.get('/data/bars/imported/sample', { params })
+  },
+
+  getQMTConfig() {
+    return request.get('/data/qmt/config')
+  },
+
+  saveQMTConfig(data: {
+    enabled?: boolean
+    account_id?: string
+    data_path?: string
+    trade_path?: string
+    auto_download_history?: boolean
+  }) {
+    return request.post('/data/qmt/config', data)
+  },
+
+  getQMTStatus() {
+    return request.get('/data/qmt/status')
+  },
+
+  syncQMTBars(data: {
+    stock_codes?: string[]
+    stock_pool_key?: string
+    frequency?: string
+    start_date: string
+    end_date: string
+    adjust?: string
+    source?: string
+    force?: boolean
+    invalidate_derived?: boolean
+  }) {
+    return request.post('/data/qmt/sync-bars', data, { timeout: 300000 })
+  },
+
+  importAkshareBars(data: {
+    stock_codes?: string[]
+    stock_pool_key?: string
+    frequency?: string
+    start_date: string
+    end_date: string
+    adjust?: string
+    source?: string
+    force?: boolean
+    invalidate_derived?: boolean
+  }) {
+    return request.post('/data/akshare/import-bars', data, { timeout: 600000 })
   },
 
   // 组合分析

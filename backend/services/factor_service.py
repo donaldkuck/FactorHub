@@ -929,11 +929,11 @@ class FactorService:
         try:
             import akshare as ak
             # 使用用户指定的接口验证连接
-            stock_zh_a_daily_qfq_df = ak.stock_zh_a_daily(
+            stock_zh_a_daily_hfq_df = ak.stock_zh_a_daily(
                 symbol="sz000001",
                 start_date="20230903",
                 end_date="20231027",
-                adjust="qfq"
+                adjust="hfq"
             )
         except Exception:
             akshare_healthy = False

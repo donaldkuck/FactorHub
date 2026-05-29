@@ -8,6 +8,7 @@ import {
   PieChartOutlined,
   SyncOutlined,
   BarChartOutlined,
+  DatabaseOutlined,
   MenuOutlined
 } from '@ant-design/icons'
 import routes from './utils/router'
@@ -248,7 +249,8 @@ function createIcon(iconName: string) {
     ExperimentOutlined,
     PieChartOutlined,
     SyncOutlined,
-    BarChartOutlined
+    BarChartOutlined,
+    DatabaseOutlined
   }
   return icons[iconName] || DashboardOutlined
 }
@@ -260,4 +262,3 @@ export default function AppWrapper() {
     </BrowserRouter>
   )
 }
-

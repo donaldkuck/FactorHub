@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 ranking_tasks = {}
 TASK_DIR = settings.CACHE_DIR / "factor_ranking_tasks"
 TASK_DIR.mkdir(parents=True, exist_ok=True)
+TASK_STALE_SECONDS = 300
 
 
 # ========== 数据模型 ==========
@@ -59,7 +60,7 @@ class RefreshRequest(BaseModel):
 # ========== API 端点 ==========
 
 @router.get("/factor-rankings")
-async def get_factor_rankings(
+def get_factor_rankings(
     stock_pool_key: str = Query(default=DEFAULT_STOCK_POOL, description="股票池 key"),
     target: str = Query(default=DEFAULT_FACTOR_TARGET, description="预测目标"),
     frequency: str = Query(default=DEFAULT_FREQUENCY, description="K线频率"),
@@ -107,7 +108,7 @@ async def get_factor_rankings(
 
 
 @router.post("/factor-rankings/refresh")
-async def refresh_factor_rankings(
+def refresh_factor_rankings(
     request: RefreshRequest,
 ):
     """启动异步补齐任务"""
@@ -195,7 +196,7 @@ async def refresh_factor_rankings(
 
 
 @router.get("/factor-rankings/tasks/{task_id}")
-async def get_refresh_task_status(task_id: str):
+def get_refresh_task_status(task_id: str):
     """查询补齐任务状态"""
     task = _read_task_status(task_id)
     if not task:
@@ -220,7 +221,7 @@ async def get_refresh_task_status(task_id: str):
 
 
 @router.post("/factor-rankings/tasks/{task_id}/cancel")
-async def cancel_refresh_task(task_id: str):
+def cancel_refresh_task(task_id: str):
     """取消补齐任务"""
     task = _read_task_status(task_id)
     if not task:
@@ -350,6 +351,7 @@ def _find_running_task(task_key: str) -> Optional[dict]:
             task = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        task = _mark_stale_task_if_needed(task)
         if task.get("task_key") == task_key and task.get("status") in {"pending", "running"}:
             return task
     return None
@@ -357,9 +359,9 @@ def _find_running_task(task_key: str) -> Optional[dict]:
 
 def _write_task_status(task_id: str, status: dict) -> None:
     payload = {
+        **status,
         "task_id": task_id,
         "updated_at": datetime.now().isoformat(),
-        **status,
     }
     path = _task_status_path(task_id)
     tmp_path = path.with_suffix(".json.tmp")
@@ -373,11 +375,61 @@ def _read_task_status(task_id: str) -> Optional[dict]:
         return ranking_tasks.get(task_id)
     try:
         status = json.loads(path.read_text(encoding="utf-8"))
+        status = _mark_stale_task_if_needed(status)
         ranking_tasks[task_id] = status
         return status
     except Exception:
         logger.warning(f"读取任务状态失败: {task_id}", exc_info=True)
         return None
+
+
+def _mark_stale_task_if_needed(task: dict) -> dict:
+    if task.get("status") not in {"pending", "running"}:
+        return task
+
+    task_id = task.get("task_id")
+    pid = task.get("pid")
+    if pid and not _is_process_alive(pid):
+        task = {
+            **task,
+            "status": "failed",
+            "error": f"任务进程 {pid} 已退出，最后停在 {task.get('current_factor') or '未知因子'}",
+        }
+        if task_id:
+            _write_task_status(task_id, task)
+        return task
+
+    updated_at = task.get("updated_at")
+    if not updated_at:
+        return task
+
+    try:
+        updated = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return task
+
+    if (datetime.now() - updated).total_seconds() < TASK_STALE_SECONDS:
+        return task
+
+    if not pid or _is_process_alive(pid):
+        task = {
+            **task,
+            "status": "stalled",
+            "error": f"任务超过 {TASK_STALE_SECONDS} 秒未更新，可能卡在行情接口或数据库等待",
+        }
+        if task_id:
+            _write_task_status(task_id, task)
+    return task
+
+
+def _is_process_alive(pid: int | str) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True
 
 
 def _update_task_status(task_id: str, updates: dict) -> None:
